@@ -31,4 +31,4 @@ echo "=== Verifying with Lean ==="
 (cd "$STRATA_ROOT" && lake exe strata print --include "$TESTDATA" "$TESTDATA/comprehensive.ion" 2>&1 | tail -1)
 
 echo ""
-echo "Done! Regenerated $TESTDATA/comprehensive.ion"
+echo "Done! Regenerated $TESTDATA/comprehensive.ion and $TESTDATA/comprehensive-files.ion"

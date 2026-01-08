@@ -14,34 +14,30 @@ namespace Laurel
 
 open Laurel
 open Std (ToFormat Format format)
-open Strata (QualifiedIdent Arg SourceRange)
+open Strata (QualifiedIdent Arg SourceRange Uri FileRange)
 open Lean.Parser (InputContext)
-open Imperative (MetaData Uri FileRange)
+open Imperative (MetaData)
 
 structure TransState where
-  inputCtx : InputContext
+  uri : Uri
   errors : Array String
 
 abbrev TransM := StateM TransState
 
-def TransM.run (ictx : InputContext) (m : TransM α) : (α × Array String) :=
-  let (v, s) := StateT.run m { inputCtx := ictx, errors := #[] }
+def TransM.run (uri : Uri) (m : TransM α) : (α × Array String) :=
+  let (v, s) := StateT.run m { uri := uri, errors := #[] }
   (v, s.errors)
 
 def TransM.error [Inhabited α] (msg : String) : TransM α := do
   modify fun s => { s with errors := s.errors.push msg }
   return panic msg
 
-def SourceRange.toMetaData (ictx : InputContext) (sr : SourceRange) : Imperative.MetaData Boogie.Expression :=
-  let file := ictx.fileName
-  let startPos := ictx.fileMap.toPosition sr.start
-  let endPos := ictx.fileMap.toPosition sr.stop
-  let uri : Uri := .file file
-  let fileRangeElt := ⟨ Imperative.MetaDataElem.Field.label "fileRange", .fileRange ⟨ uri, startPos, endPos ⟩ ⟩
+def SourceRange.toMetaData (uri : Uri) (sr : SourceRange) : Imperative.MetaData Boogie.Expression :=
+  let fileRangeElt := ⟨ Imperative.MetaDataElem.Field.label "fileRange", .fileRange ⟨ uri, sr.start, sr.stop ⟩ ⟩
   #[fileRangeElt]
 
 def getArgMetaData (arg : Arg) : TransM (Imperative.MetaData Boogie.Expression) :=
-  return SourceRange.toMetaData (← get).inputCtx arg.ann
+  return SourceRange.toMetaData (← get).uri arg.ann
 
 def checkOp (op : Strata.Operation) (name : QualifiedIdent) (argc : Nat) :
   TransM Unit := do
@@ -64,16 +60,16 @@ def translateIdent (arg : Arg) : TransM Identifier := do
 def translateBool (arg : Arg) : TransM Bool := do
   match arg with
   | .expr (.fn _ name) =>
-    if name == q`Laurel.boolTrue then
+    if name == q`Init.boolTrue then
       return true
-    else if name == q`Laurel.boolFalse then
+    else if name == q`Init.boolFalse then
       return false
     else
       TransM.error s!"translateBool expects boolTrue or boolFalse, got {repr name}"
   | .op op =>
-    if op.name == q`Laurel.boolTrue then
+    if op.name == q`Init.boolTrue then
       return true
-    else if op.name == q`Laurel.boolFalse then
+    else if op.name == q`Init.boolFalse then
       return false
     else
       TransM.error s!"translateBool expects boolTrue or boolFalse, got {repr op.name}"

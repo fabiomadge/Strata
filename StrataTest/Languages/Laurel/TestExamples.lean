@@ -16,19 +16,20 @@ open StrataTest.Util
 open Strata
 open Strata.Elab (parseStrataProgramFromDialect)
 
+namespace Strata
 namespace Laurel
 
 def processLaurelFile (filePath : String) : IO (Array Diagnostic) := do
   let dialects := Strata.Elab.LoadedDialects.ofDialects! #[initDialect, Laurel]
   let (inputContext, strataProgram) ← parseStrataProgramFromDialect dialects Laurel.name filePath
 
-  -- Convert to Laurel.Program using parseProgram (handles unwrapping the program operation)
-  let (laurelProgram, transErrors) := Laurel.TransM.run inputContext (Laurel.parseProgram strataProgram)
+  let uri := Strata.Uri.file filePath
+  let (laurelProgram, transErrors) := Laurel.TransM.run uri (Laurel.parseProgram strataProgram)
   if transErrors.size > 0 then
     throw (IO.userError s!"Translation errors: {transErrors}")
 
-  -- Verify the program
-  let diagnostics ← Laurel.verifyToDiagnostics "z3" laurelProgram
+  let files := Map.insert Map.empty uri inputContext.fileMap
+  let diagnostics ← Laurel.verifyToDiagnostics "z3" files laurelProgram
 
   pure diagnostics
 
