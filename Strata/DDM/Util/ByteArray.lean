@@ -3,15 +3,15 @@
 
   SPDX-License-Identifier: Apache-2.0 OR MIT
 -/
+module
 
 /-
 Functions for ByteArray that could potentially be upstreamed to Lean.
 -/
 import Std.Data.HashMap
+public import Lean.ToExpr
 
 namespace ByteArray
-
-deriving instance DecidableEq for ByteArray
 
 def back! (a : ByteArray) : UInt8 := a.get! (a.size - 1)
 
@@ -29,26 +29,11 @@ def foldr {β} (f : UInt8 → β → β) (init : β) (as : ByteArray) (start := 
         aux (i-1) (by omega) (f as[i-1] b)
   aux (min start as.size) (Nat.min_le_right _ _) init
 
-def byteToHex (b : UInt8) : String :=
-  let cl : String := .ofList (Nat.toDigits 16 b.toNat)
-  if cl.length < 2 then "0" ++ cl else cl
-
-def asHex (a : ByteArray) : String :=
-  a.foldl (init := "") fun s b => s ++ byteToHex b
-
 def startsWith (a pre : ByteArray) :=
   if isLt : a.size < pre.size then
     false
   else
     pre.size.all fun i _ => a[i] = pre[i]
-
-instance : Repr ByteArray where
-  reprPrec a p := Repr.addAppParen ("ByteArray.mk " ++ reprArg a.data) p
-
-def ofNatArray (a : Array Nat) : ByteArray := .mk (a.map UInt8.ofNat)
-
-instance : Lean.Quote ByteArray where
-  quote b := Lean.Syntax.mkCApp ``ofNatArray #[Lean.quote (b.data.map fun b => b.toNat)]
 
 end ByteArray
 
@@ -58,7 +43,28 @@ end ByteArray
 #guard (ByteArray.empty |>.pop) = .empty
 #guard let a := ByteArray.empty |>.push 0 |>.push 1; (a |>.push 2 |>.pop) = a
 
+public section
 namespace Strata.ByteArray
+
+def ofNatArray (a : Array Nat) : ByteArray := .mk (a.map UInt8.ofNat)
+
+open Lean in
+instance : Lean.ToExpr ByteArray where
+  toTypeExpr := private mkConst ``ByteArray
+  toExpr a := private mkApp (mkConst ``ByteArray.ofNatArray) <| toExpr <| a.data.map (·.toNat)
+
+private def byteToHex (b : UInt8) : String :=
+  let cl : String := .ofList (Nat.toDigits 16 b.toNat)
+  if cl.length < 2 then "0" ++ cl else cl
+
+def asHex (a : ByteArray) : String :=
+  a.foldl (init := "") fun s b => s ++ byteToHex b
+
+protected def reprPrec (a : ByteArray) (p : Nat) :=
+  Repr.addAppParen ("ByteArray.mk " ++ reprArg a.data) p
+
+instance : Repr ByteArray where
+  reprPrec := ByteArray.reprPrec
 
 def escapedBytes : Std.HashMap UInt8 Char := Std.HashMap.ofList [
     (9, 't'),
@@ -184,3 +190,4 @@ def unescapeBytes (s : String) : Except (String.ValidPos s × String.ValidPos s 
   | .ok (a, _) => .ok a
 
 end Strata.ByteArray
+end

@@ -3,10 +3,15 @@
 
   SPDX-License-Identifier: Apache-2.0 OR MIT
 -/
+module
 
-import Strata.DDM.Integration.Lean.Env
-import Strata.DDM.Integration.Lean.ToExpr
-import Strata.DDM.TaggedRegions
+public import Lean.Elab.Command
+public import Lean.Parser.Types
+public meta import Strata.DDM.Elab
+public meta import Strata.DDM.Integration.Lean.Env
+public meta import Strata.DDM.Integration.Lean.ToExpr
+public meta import Strata.DDM.TaggedRegions
+public meta import Strata.DDM.Util.Lean
 
 open Lean
 open Lean.Elab (throwUnsupportedSyntax)
@@ -14,7 +19,9 @@ open Lean.Elab.Command (CommandElab CommandElabM liftCoreM)
 open Lean.Elab.Term (TermElab)
 open Lean.Parser (InputContext)
 open System (FilePath)
+open Strata.Lean
 
+public meta section
 namespace Strata
 
 class HasInputContext (m : Type → Type _) [Functor m] where
@@ -22,9 +29,7 @@ class HasInputContext (m : Type → Type _) [Functor m] where
   getFileName : m FilePath :=
     (fun ctx => FilePath.mk ctx.fileName) <$> getInputContext
 
-export HasInputContext (getInputContext)
-
-instance : HasInputContext CommandElabM where
+private instance : HasInputContext CommandElabM where
   getInputContext := do
     let ctx ← read
     pure {
@@ -34,7 +39,7 @@ instance : HasInputContext CommandElabM where
     }
   getFileName := return (← read).fileName
 
-instance : HasInputContext CoreM where
+private instance : HasInputContext CoreM where
   getInputContext := do
     let ctx ← read
     pure {
@@ -53,16 +58,9 @@ private def mkScopedName {m} [Monad m] [MonadError m] [MonadEnv m] [MonadResolve
   return fullName
 
 /--
-Prepend the current namespace to the Lean name and convert to an identifier.
--/
-private def mkAbsIdent (name : Lean.Name) : Ident :=
-  let nameStr := toString name
-  .mk (.ident .none nameStr.toSubstring name [.decl name []])
-
-/--
 Add a definition to environment and compile it.
 -/
-def addDefn (name : Lean.Name)
+private def addDefn (name : Lean.Name)
             (type : Lean.Expr)
             (value : Lean.Expr)
             (levelParams : List Name := [])
@@ -111,12 +109,12 @@ def declareDialect (d : Dialect) : CommandElabM Unit := do
 declare_tagged_region command strataDialectCommand "#dialect" "#end"
 
 @[command_elab strataDialectCommand]
-def strataDialectImpl: Lean.Elab.Command.CommandElab := fun (stx : Syntax) => do
+def strataDialectImpl: CommandElab := fun (stx : Syntax) => do
   let .atom i v := stx[1]
         | throwError s!"Bad {stx[1]}"
   let .original _ p _ e := i
         | throwError s!"Expected input context"
-  let inputCtx ← getInputContext
+  let inputCtx ← HasInputContext.getInputContext
   let loaded := (dialectExt.getState (←Lean.getEnv)).loaded
   let (_, d, s) ← Strata.Elab.elabDialect {} loaded inputCtx p e
   if !s.errors.isEmpty then
@@ -129,12 +127,12 @@ def strataDialectImpl: Lean.Elab.Command.CommandElab := fun (stx : Syntax) => do
 declare_tagged_region term strataProgram "#strata" "#end"
 
 @[term_elab strataProgram]
-def strataProgramImpl : TermElab := fun stx tp => do
+meta def strataProgramImpl : TermElab := fun stx tp => do
   let .atom i v := stx[1]
         | throwError s!"Bad {stx[1]}"
   let .original _ p _ e := i
         | throwError s!"Expected input context"
-  let inputCtx ← (getInputContext : CoreM _)
+  let inputCtx ← (HasInputContext.getInputContext : CoreM _)
   let s := (dialectExt.getState (←Lean.getEnv))
   let leanEnv ← Lean.mkEmptyEnvironment 0
   match Elab.elabProgram s.loaded leanEnv inputCtx p e with
@@ -190,3 +188,4 @@ def loadDialectImpl: CommandElab := fun (stx : Syntax) => do
     throwUnsupportedSyntax
 
 end Strata
+end

@@ -3,8 +3,15 @@
 
   SPDX-License-Identifier: Apache-2.0 OR MIT
 -/
-import Strata.DDM.Elab.DeclM
-import Strata.DDM.Elab.Tree
+module
+
+public import Strata.DDM.Elab.DeclM
+public import Strata.DDM.Elab.Tree
+
+import all Strata.DDM.Util.Array
+import all Strata.DDM.Util.Fin
+import all Strata.DDM.Util.Lean
+import Strata.DDM.HNF
 
 open Lean (
     Message
@@ -12,8 +19,9 @@ open Lean (
     Syntax
     nullKind
   )
-open Strata.Parser (DeclParser InputContext ParserState)
+open Strata.Parser (DeclParser InputContext)
 
+public section
 namespace Strata
 
 namespace TypeExprF
@@ -23,7 +31,7 @@ This applies global context to instantiate types and variables.
 
 Free type alias variables bound to alias
 -/
-protected def instType (d : TypeExprF α) (bindings : Array (TypeExprF α)) : TypeExprF α := Id.run <|
+protected def instType {α} (d : TypeExprF α) (bindings : Array (TypeExprF α)) : TypeExprF α := Id.run <|
   d.instTypeM fun n idx =>
     if p : idx < bindings.size then
       pure <| bindings[bindings.size - (idx+1)]
@@ -138,7 +146,7 @@ structure ElabState where
   -- Errors found in elaboration.
   errors : Array Message := #[]
 
-@[reducible]
+@[reducible, expose]
 def ElabM α := ReaderT ElabContext (StateM ElabState) α
 
 instance : ElabClass ElabM where
@@ -239,7 +247,10 @@ def translateQualifiedIdent (t : Tree) : MaybeQualifiedIdent :=
   | q`Init.qualifiedIdentImplicit, 1 => Id.run do
     let .ident _ name := args[0]
       | return panic! "Expected ident"
-    .name name
+    let name := name.stripPrefix "«" |>.stripSuffix "»"
+    match name.splitOn "." with
+    | [dialect, rest] => .qid { dialect, name := rest }
+    | _ => .name name
   | q`Init.qualifiedIdentExplicit, 2 => Id.run do
     let .ident _ dialect := args[0]
       | return panic! "Expected ident"
@@ -703,7 +714,7 @@ def translateTypeExpr (tree : Tree) : ElabM TypeExpr := do
 /--
 Evaluate the tree as a type expression.
 -/
-partial def translateBindingKind (tree : Tree) : ElabM BindingKind := do
+def translateBindingKind (tree : Tree) : ElabM BindingKind := do
   let (⟨argInfo, argChildren⟩, args) := flattenTypeApp tree #[]
   let opInfo :=
         match argInfo with
@@ -714,6 +725,38 @@ partial def translateBindingKind (tree : Tree) : ElabM BindingKind := do
     let nameTree := argChildren[0]
     let tpId := translateQualifiedIdent nameTree
     let nameLoc := nameTree.info.loc
+    let tctx := nameTree.info.inputCtx
+    -- First check if the type is in the GlobalContext (for user-defined types like datatypes)
+    if let .name name := tpId then
+      if let some binding := tctx.lookupVar name then
+        let tpArgs ← args.mapM translateTypeExpr
+        match binding with
+        | .fvar fidx k =>
+          match k with
+          | .type params _ =>
+            let params := params.toArray
+            if params.size = tpArgs.size then
+              return .expr (.fvar nameLoc fidx tpArgs)
+            else if let some a := tpArgs[params.size]? then
+              logErrorMF a.ann mf!"Unexpected argument to {name}."
+              return default
+            else
+              logErrorMF nameLoc mf!"{name} expects {params.size} arguments."
+              return default
+          | .expr _ =>
+            logErrorMF nameLoc mf!"Expected a type instead of expression {name}."
+            return default
+        | .bvar idx k =>
+          if let .type loc [] _ := k then
+            if tpArgs.isEmpty then
+              return .expr (.bvar loc idx)
+            else
+              logErrorMF nameLoc mf!"Unexpected arguments to type variable {name}."
+              return default
+          else
+            logErrorMF nameLoc mf!"Expected a type instead of {k}"
+            return default
+    -- Dialect-defined types
     let some (name, decl) ← resolveTypeOrCat nameLoc tpId
       | return default
     match decl with
@@ -769,7 +812,7 @@ def evalBindingSpec
               panic! s!"Cannot bind {ident} unexpected category {repr info.cat}"
             else if !bindings.isEmpty then
               panic! s!"Arguments not allowed on category."
-            else if let .atom loc q`Init.Type := info.cat then
+            else if info.cat.name == q`Init.Type then
               pure <| .type loc [] none
             else
               pure <| .cat info.cat
@@ -798,6 +841,9 @@ def evalBindingSpec
             | _ =>
               panic! "Bad arg"
     pure { ident, kind := .type loc params.toList value }
+  | .datatype b =>
+    let ident := evalBindingNameIndex args b.nameIndex
+    pure { ident, kind := .type loc [] none }
 
 /--
 Given a type expression and a natural number, this returns a
@@ -957,13 +1003,36 @@ partial def runSyntaxElaborator
     let argLevel := ae.argLevel
     let .isTrue argLevelP := inferInstanceAs (Decidable (argLevel < argc))
         | return panic! "Invalid argLevel"
+    -- Compute the typing context for this argument
     let tctx ←
-      match ae.contextLevel with
-      | some idx =>
-        match trees[idx] with
-        | some t => pure t.resultContext
-        | none => continue
-      | none => pure tctx0
+      /- Recursive datatypes make this a bit complicated, since we need to make
+      sure the type is resolved as an fvar even while processing it. -/
+      match ae.datatypeScope with
+      | some (nameLevel, typeParamsLevel) =>
+        let nameTree := trees[nameLevel]
+        let typeParamsTree := trees[typeParamsLevel]
+        match nameTree, typeParamsTree with
+        | some nameT, some typeParamsT =>
+          let datatypeName :=
+            match nameT.info with
+            | .ofIdentInfo info => info.val
+            | _ => panic! "Expected identifier for datatype name"
+          let baseCtx := typeParamsT.resultContext
+          -- Add the datatype name to the GlobalContext as a type
+          let gctx := baseCtx.globalContext
+          let gctx :=
+            if datatypeName ∈ gctx then gctx
+            else gctx.push datatypeName (GlobalKind.type [] none)
+          -- Create a new typing context with the updated GlobalContext
+          pure (baseCtx.withGlobalContext gctx)
+        | _, _ => continue
+      | none =>
+        match ae.contextLevel with
+        | some idx =>
+          match trees[idx] with
+          | some t => pure t.resultContext
+          | none => continue
+        | none => pure tctx0
     let astx := args[ae.syntaxLevel]
     let expectedKind := argDecls[argLevel].kind
     match expectedKind with
@@ -1097,28 +1166,30 @@ partial def catElaborator (c : SyntaxCat) : TypingContext → Syntax → ElabM T
     let a := c.args[0]!
     elabOption (catElaborator a)
   |  q`Init.Seq =>
-    assert! c.args.size = 1
-    let a := c.args[0]!
-    let f := elabManyElement (catElaborator a)
-    fun tctx stx => do
-      let some loc := mkSourceRange? stx
-        | panic! "seq missing source location"
-      let (args, resultCtx) ← stx.getArgs.foldlM f (#[], tctx)
-      let info : SeqInfo := { inputCtx := tctx, loc := loc, args := args.map (·.arg), resultCtx }
-      pure <| .node (.ofSeqInfo info) args
+    elabSeqWith c .none "seq" (·.getArgs)
   | q`Init.CommaSepBy =>
-    assert! c.args.size = 1
-    let a := c.args[0]!
-    let f := elabManyElement (catElaborator a)
-    fun tctx stx => do
-      let some loc := mkSourceRange? stx
-        | panic! s!"commaSepBy missing source location {repr stx}"
-      let (args, resultCtx) ← stx.getSepArgs.foldlM f (#[], tctx)
-      let info : CommaSepInfo := { inputCtx := tctx, loc := loc, args := args.map (·.arg), resultCtx }
-      pure <| .node (.ofCommaSepInfo info) args
+    elabSeqWith c .comma "commaSepBy" (·.getSepArgs)
+  | q`Init.SpaceSepBy =>
+    elabSeqWith c .space "spaceSepBy" (·.getSepArgs)
+  | q`Init.SpacePrefixSepBy =>
+    elabSeqWith c .spacePrefix "spacePrefixSepBy" (·.getArgs)
+  | q`Init.NewlineSepBy =>
+    elabSeqWith c .newline "newlineSepBy" (·.getArgs)
   | _ =>
     assert! c.args.isEmpty
     elabOperation
+
+where
+  elabSeqWith (c : SyntaxCat) (sep : SepFormat) (name : String) (getArgsFrom : Syntax → Array Syntax) : TypingContext → Syntax → ElabM Tree :=
+    assert! c.args.size = 1
+    let a := c.args[0]!
+    let f := elabManyElement (catElaborator a)
+    fun tctx stx => do
+      let some loc := mkSourceRange? stx
+        | panic! s!"{name} missing source location {repr stx}"
+      let (args, resultCtx) ← (getArgsFrom stx).foldlM f (#[], tctx)
+      let info : SeqInfo := { inputCtx := tctx, loc := loc, sep := sep, args := args.map (·.arg), resultCtx }
+      pure <| .node (.ofSeqInfo info) args
 
 partial def elabExpr (tctx : TypingContext) (stx : Syntax) : ElabM Tree := do
   match stx.getKind with
@@ -1272,3 +1343,4 @@ partial def elabCommand (leanEnv : Lean.Environment) : DeclM (Option Tree) := do
   runElab <| some <$> elabOperation (.empty glbl) stx
 
 end Strata.Elab
+end

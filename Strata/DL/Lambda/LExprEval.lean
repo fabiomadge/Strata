@@ -141,7 +141,8 @@ def eval (n : Nat) (σ : LState TBase) (e : (LExpr TBase.mono))
       match σ.config.factory.callOfLFunc e with
       | some (op_expr, args, lfunc) =>
         let args := args.map (fun a => eval n' σ a)
-        if h: "inline" ∈ lfunc.attr && lfunc.body.isSome then
+        if h: lfunc.body.isSome && ("inline" ∈ lfunc.attr ||
+          ("inline_if_val" ∈ lfunc.attr && args.all (isCanonicalValue σ.config.factory))) then
           -- Inline a function only if it has a body.
           let body := lfunc.body.get (by simp_all)
           let input_map := lfunc.inputs.keys.zip args
@@ -163,7 +164,7 @@ def eval (n : Nat) (σ : LState TBase) (e : (LExpr TBase.mono))
             -- At least one argument in the function call is symbolic.
             new_e
       | none =>
-        -- Not a call of a factory function.
+        -- Not a call of a factory function - go through evalCore
         evalCore n' σ e
 
 def evalCore  (n' : Nat) (σ : LState TBase) (e : LExpr TBase.mono) : LExpr TBase.mono :=

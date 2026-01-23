@@ -3,10 +3,14 @@
 
   SPDX-License-Identifier: Apache-2.0 OR MIT
 -/
+module
+public import Strata.DDM.AST
+public import Std.Data.HashMap.Basic
 
 import Strata.DDM.Parser
 import Strata.DDM.Util.Lean
 
+public section
 namespace Strata.Elab
 
 /--
@@ -20,6 +24,9 @@ structure ArgElaborator where
   argLevel : Nat
   -- Index of argument to use for typing context (if specified, must be less than argIndex)
   contextLevel : Option (Fin argLevel) := .none
+  -- Datatype scope: (nameLevel, typeParamsLevel) for recursive datatype definitions
+  -- When set, the datatype name is added to the typing context as a type
+  datatypeScope : Option (Fin argLevel × Fin argLevel) := .none
   -- Whether to unwrap this argument
   unwrap : Bool := false
 deriving Inhabited, Repr
@@ -28,7 +35,7 @@ abbrev ArgElaboratorArray (sc : Nat) :=
   Array { a : ArgElaborator // a.syntaxLevel < sc }
 
 /-- Information needed to elaborator arguments to operations or functions. -/
-structure ArgElaborators where
+private structure ArgElaborators where
   /-- Expected number of arguments elaborator will process. -/
   syntaxCount : Nat
   argElaborators : ArgElaboratorArray syntaxCount
@@ -36,7 +43,7 @@ deriving Inhabited, Repr
 
 namespace ArgElaborators
 
-def inc (as : ArgElaborators) : ArgElaborators :=
+private def inc (as : ArgElaborators) : ArgElaborators :=
   let sc := as.syntaxCount
   let elabs := as.argElaborators.unattach
   have ext (e : ArgElaborator) (mem : e ∈ elabs) : e.syntaxLevel < sc + 1 := by
@@ -48,7 +55,7 @@ def inc (as : ArgElaborators) : ArgElaborators :=
     argElaborators := elabs'
   }
 
-def push (as : ArgElaborators)
+private def push (as : ArgElaborators)
          (argDecls : ArgDecls)
          (argLevel : Fin argDecls.size) : ArgElaborators :=
   let sc := as.syntaxCount
@@ -57,20 +64,23 @@ def push (as : ArgElaborators)
     syntaxLevel := sc
     argLevel := argLevel.val
     contextLevel := argDecls.argScopeLevel argLevel
+    datatypeScope := argDecls.argScopeDatatypeLevel argLevel
   }
   have scp : sc < sc + 1 := by grind
   { as with argElaborators := as.argElaborators.push ⟨newElab, scp⟩ }
 
-def pushWithUnwrap (as : ArgElaborators)
-         (argDecls : ArgDecls)
-         (argLevel : Fin argDecls.size)
-         (unwrap : Bool) : ArgElaborators :=
+private def pushWithUnwrap
+        (as : ArgElaborators)
+        (argDecls : ArgDecls)
+        (argLevel : Fin argDecls.size)
+        (unwrap : Bool) : ArgElaborators :=
   let sc := as.syntaxCount
   let as := as.inc
   let newElab : ArgElaborator := {
     syntaxLevel := sc
     argLevel := argLevel.val
     contextLevel := argDecls.argScopeLevel argLevel
+    datatypeScope := argDecls.argScopeDatatypeLevel argLevel
     unwrap := unwrap
   }
   have scp : sc < sc + 1 := by grind
@@ -78,7 +88,7 @@ def pushWithUnwrap (as : ArgElaborators)
 
 end ArgElaborators
 
-def addElaborators (argDecls : ArgDecls) (p : ArgElaborators) (a : SyntaxDefAtom) : ArgElaborators :=
+private def addElaborators (argDecls : ArgDecls) (p : ArgElaborators) (a : SyntaxDefAtom) : ArgElaborators :=
   match a with
   | .ident level _prec unwrap =>
     if h : level < argDecls.size then
@@ -103,7 +113,7 @@ structure SyntaxElaborator where
   unwrapSpecs : Array Bool := #[]
 deriving Inhabited, Repr
 
-def mkSyntaxElab (argDecls : ArgDecls) (stx : SyntaxDef) (opMd : Metadata) : SyntaxElaborator :=
+private def mkSyntaxElab (argDecls : ArgDecls) (stx : SyntaxDef) (opMd : Metadata) : SyntaxElaborator :=
   let init : ArgElaborators := {
     syntaxCount := 0
     argElaborators := Array.mkEmpty argDecls.size
@@ -124,20 +134,20 @@ def mkSyntaxElab (argDecls : ArgDecls) (stx : SyntaxDef) (opMd : Metadata) : Syn
     unwrapSpecs := unwrapSpecs
   }
 
-def opDeclElaborator (decl : OpDecl) : SyntaxElaborator :=
+private def opDeclElaborator (decl : OpDecl) : SyntaxElaborator :=
   mkSyntaxElab decl.argDecls decl.syntaxDef decl.metadata
 
-def fnDeclElaborator (decl : FunctionDecl) : SyntaxElaborator :=
+private def fnDeclElaborator (decl : FunctionDecl) : SyntaxElaborator :=
   mkSyntaxElab decl.argDecls decl.syntaxDef decl.metadata
 
 abbrev SyntaxElabMap := Std.HashMap QualifiedIdent SyntaxElaborator
 
 namespace SyntaxElabMap
 
-def add (m : SyntaxElabMap) (dialect : String) (name : String) (se : SyntaxElaborator) : SyntaxElabMap :=
+private def add (m : SyntaxElabMap) (dialect : String) (name : String) (se : SyntaxElaborator) : SyntaxElabMap :=
   m.insert { dialect, name := name } se
 
-def addDecl (m : SyntaxElabMap) (dialect : String) (d : Decl) : SyntaxElabMap :=
+private def addDecl (m : SyntaxElabMap) (dialect : String) (d : Decl) : SyntaxElabMap :=
   match d with
   | .op d => m.add dialect d.name (opDeclElaborator d)
   | .function d => m.add dialect d.name (fnDeclElaborator d)
@@ -146,4 +156,5 @@ def addDecl (m : SyntaxElabMap) (dialect : String) (d : Decl) : SyntaxElabMap :=
 def addDialect (m : SyntaxElabMap) (d : Dialect) : SyntaxElabMap :=
   d.declarations.foldl (·.addDecl d.name) m
 
-end SyntaxElabMap
+end Strata.Elab.SyntaxElabMap
+end

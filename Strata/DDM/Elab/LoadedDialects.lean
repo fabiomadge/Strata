@@ -3,11 +3,14 @@
 
   SPDX-License-Identifier: Apache-2.0 OR MIT
 -/
-
-import Strata.DDM.Elab.SyntaxElab
+module
+public import Std.Data.HashMap.Basic
+public import Strata.DDM.Parser
+public import Strata.DDM.Elab.SyntaxElab
 
 open Strata.Parser (DeclParser ParsingContext)
 
+public section
 namespace Strata.Elab
 
 /--
@@ -36,7 +39,7 @@ structure LoadedDialects where
   dialectParsers : DialectParsers
   /--/ Map for elaborating operations and functions. -/
   syntaxElabMap : SyntaxElabMap
-  deriving Inhabited
+deriving Inhabited
 
 def initParsers : Parser.ParsingContext where
   fixedParsers := .ofList [
@@ -46,6 +49,17 @@ def initParsers : Parser.ParsingContext where
     (q`Init.Decimal, Parser.decimalLit),
     (q`Init.Str, Parser.strLit)
   ]
+
+def DialectParsers.ofDialects (ds : Array Dialect) : Except String DialectParsers :=
+  ds.foldlM (init := {}) fun m d =>
+    match initParsers.mkDialectParsers d with
+    | .error msg =>
+      .error s!"Could not add open dialect: {eformat msg |>.pretty}"
+    | .ok parsers =>
+      .ok (m.insert d.name parsers)
+
+def SyntaxElabMap.ofDialects (ds : Array Dialect) : SyntaxElabMap :=
+  ds.foldl (init := {}) (·.addDialect ·)
 
 namespace LoadedDialects
 
@@ -67,7 +81,15 @@ def addDialect! (loader : LoadedDialects) (d : Dialect) : LoadedDialects :=
     }
 
 def ofDialects! (ds : Array Dialect) : LoadedDialects :=
-  ds.foldl (init := .empty) (·.addDialect! ·)
+  match DialectParsers.ofDialects ds with
+  | .error msg =>
+    panic s!"Could not add open dialect: {eformat msg |>.pretty}"
+  | .ok parsers =>
+    {
+      dialects := .ofList! ds.toList
+      dialectParsers := parsers
+      syntaxElabMap := SyntaxElabMap.ofDialects ds
+    }
 
 end LoadedDialects
 
@@ -131,7 +153,8 @@ def add (m : DialectFileMap) (dir : System.FilePath) : EIO String DialectFileMap
     else if let some stem := matchExt entry.fileName strata_ion_dialect_ext then
       m.addEntry stem .ion entry.path
     else do
-      let _ ← IO.eprintln s!"Skipping {dir / entry.fileName}" |>.toBaseIO
+      if !entry.fileName.startsWith "." then
+        let _ ← IO.eprintln s!"Skipping {dir / entry.fileName}" |>.toBaseIO
       pure m
 
 def ofDirs (dirs : Array System.FilePath) : EIO String DialectFileMap :=
@@ -143,3 +166,5 @@ def findPath (m : DialectFileMap) (name : DialectName) : Option System.FilePath 
   | some (_, _, path) => pure path
 
 end DialectFileMap
+end Strata
+end

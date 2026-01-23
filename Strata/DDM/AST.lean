@@ -3,29 +3,23 @@
 
   SPDX-License-Identifier: Apache-2.0 OR MIT
 -/
+module
+
+public import Std.Data.HashMap.Basic
+public import Strata.DDM.Util.ByteArray
+public import Strata.DDM.Util.Decimal
+public import Lean.Data.Position
+public import Strata.DDM.AST.Datatype
 
 import Std.Data.HashMap
-import Strata.DDM.Util.Array
-import Strata.DDM.Util.ByteArray
-import Strata.DDM.Util.Decimal
-import Std.Data.HashMap.Lemmas
+import all Strata.DDM.Util.Array
+import all Strata.DDM.Util.ByteArray
 
 set_option autoImplicit false
 
-namespace Strata.Array
-
-theorem mem_iff_back_or_pop {α} (a : α) {as : Array α} (p : as.size > 0 := by get_elem_tactic) :
-  a ∈ as ↔ (a = as.back ∨ a ∈ as.pop) := by
-  simp [Array.mem_iff_getElem]
-  grind
-
-theorem of_mem_pop {α} {a : α} {as : Array α} : a ∈ as.pop → a ∈ as := by
-  simp [Array.mem_iff_getElem]
-  grind
-
-end Strata.Array
-
+public section
 namespace Strata
+open Std (ToFormat Format format)
 
 abbrev DialectName := String
 
@@ -41,28 +35,27 @@ def fullName (i : QualifiedIdent) : String := s!"{i.dialect}.{i.name}"
 instance : ToString QualifiedIdent where
   toString := fullName
 
-syntax:max (name := quoteIdent) "q`" noWs ident : term
-
 section
-
 open _root_.Lean
+public protected def quote (i : QualifiedIdent) : Term := Syntax.mkCApp ``QualifiedIdent.mk #[quote i.dialect, quote i.name]
 
 instance : Quote QualifiedIdent where
-  quote i := Syntax.mkCApp ``QualifiedIdent.mk #[quote i.dialect, quote i.name]
+  quote := QualifiedIdent.quote
 
-@[macro quoteIdent] def quoteIdentImpl : Macro
+syntax:max (name := quoteIdent) "q`" noWs ident : term
+
+@[macro quoteIdent] meta def quoteIdentImpl : Macro
   | `(q`$l:ident) =>
     if let .str (.str .anonymous d) suf := l.getId then
-      pure (quote (QualifiedIdent.mk d suf) : Term)
+      pure <| Syntax.mkCApp ``QualifiedIdent.mk #[quote d, quote suf]
     else
       throw (.error l.raw "Quoted identifiers must contain two components")
   | _ => Macro.throwUnsupported
-
 end
 
-end QualifiedIdent
-
 #guard q`A.C = { dialect := "A", name := "C" }
+
+end QualifiedIdent
 
 /--
 Denotes a fully specified syntax category in the Strata dialect.
@@ -149,24 +142,49 @@ protected def instTypeM {m α} [Monad m] (d : TypeExprF α) (bindings : α → N
   | .arrow n a b => .arrow n <$> a.instTypeM bindings <*> b.instTypeM bindings
 termination_by d
 
-def flattenArrow {α} : Array (TypeExprF α) → TypeExprF α → Array (TypeExprF α)
-| a, .arrow _ l r => flattenArrow (a.push l) r
-| a, r => a.push r
-
-theorem flattenArrow_size {α} (args : Array (TypeExprF α)) (r : TypeExprF α) :
-  sizeOf (flattenArrow args r) ≤ 1 + sizeOf args + sizeOf r := by
-  unfold flattenArrow
-  split
-  case h_1 =>
-    rename_i l r
-    have h := flattenArrow_size (args.push l) r
-    simp at *
-    omega
-  case h_2 =>
-    decreasing_tactic
-  termination_by r
-
 end TypeExprF
+
+/-- Separator format for sequence formatting -/
+inductive SepFormat where
+| none           -- No separator (original Seq)
+| comma          -- Comma separator (CommaSepBy)
+| space          -- Space separator (SpaceSepBy)
+| spacePrefix    -- Space before each element (SpacePrefixSepBy)
+| newline        -- Newline separator (NewlineSepBy)
+deriving Inhabited, Repr, BEq
+
+namespace SepFormat
+
+def toString : SepFormat → String
+  | .none => "seq"
+  | .comma => "commaSepBy"
+  | .space => "spaceSepBy"
+  | .spacePrefix => "spacePrefixSepBy"
+  | .newline => "newlineSepBy"
+
+def toIonName : SepFormat → String
+  | .none => "seq"
+  | .comma => "commaSepList"
+  | .space => "spaceSepList"
+  | .spacePrefix => "spacePrefixedList"
+  | .newline => "newlineSepList"
+
+def fromIonName? : String → Option SepFormat
+  | "seq" => some .none
+  | "commaSepList" => some .comma
+  | "spaceSepList" => some .space
+  | "spacePrefixedList" => some .spacePrefix
+  | "newlineSepList" => some .newline
+  | _ => none
+
+theorem fromIonName_toIonName_roundtrip (sep : SepFormat) :
+  fromIonName? (toIonName sep) = some sep := by
+  cases sep <;> rfl
+
+instance : ToString SepFormat where
+  toString := SepFormat.toString
+
+end SepFormat
 
 mutual
 
@@ -194,8 +212,7 @@ inductive ArgF (α : Type) : Type where
 | strlit (ann : α) (i : String)
 | bytes (ann : α) (a : ByteArray)
 | option (ann : α) (l : Option (ArgF α))
-| seq (ann : α) (l : Array (ArgF α))
-| commaSepList (ann : α) (l : Array (ArgF α))
+| seq (ann : α) (sep : SepFormat) (l : Array (ArgF α))
 deriving Inhabited, Repr
 
 end
@@ -219,91 +236,31 @@ def ArgF.ann {α : Type} : ArgF α → α
 | .bytes ann _ => ann
 | .strlit ann _ => ann
 | .option ann _ => ann
-| .seq ann _ => ann
-| .commaSepList ann _ => ann
+| .seq ann _ _ => ann
 
 end
 
 namespace OperationF
 
-def sizeOf_spec {α} [SizeOf α] (op : OperationF α) : sizeOf op = 1 + sizeOf op.ann + sizeOf op.name + sizeOf op.args :=
+theorem sizeOf_spec {α} [SizeOf α] (op : OperationF α) : sizeOf op = 1 + sizeOf op.ann + sizeOf op.name + sizeOf op.args :=
   match op with
   | { ann, name, args } => by simp
 
-theorem sizeOf_lt_of_op_arg {α} {e : ArgF α} {op : OperationF α} (p : e ∈ op.args) : sizeOf e < sizeOf op := by
-  cases op with
-  | mk ann name args =>
-    have q : sizeOf e < sizeOf args := by decreasing_tactic
-    decreasing_tactic
+private theorem sizeOf_lt_of_op_arg {α} {e : ArgF α} {op : OperationF α} (p : e ∈ op.args) : sizeOf e < sizeOf op := by
+  let ⟨ann, name, args⟩ := op
+  have q : sizeOf e < sizeOf args := by decreasing_tactic
+  decreasing_tactic
 
 end OperationF
 
-/--
-Array ofelements whose sizes are bounded by a value.
--/
-abbrev SizeBounded (α : Type _) [SizeOf α] {β} [SizeOf β] (e : β) (c : Int) := { a : α // sizeOf a ≤ sizeOf e + c }
-
 namespace ExprF
 
-/--
-Head-normal form for an expression consists of an operation
--/
-structure HNF {α} (e : ExprF α) where
-  fn : ExprF α
-  args : SizeBounded (Array (ArgF α)) e 1
-
-protected def hnf {α} (e0 : ExprF α) : HNF e0 :=
-  let rec aux (e : ExprF α) (args : Array (ArgF α) := #[])
-              (szP : sizeOf e + sizeOf args ≤ sizeOf e0 + 2): HNF e0 :=
-    match e with
-    | .bvar .. | .fvar .. | .fn .. =>
-      { fn := e, args := ⟨args.reverse, by simp at szP; simp; omega⟩ }
-    | .app _ f a =>
-      aux f (args.push a) (by simp at *; omega)
-  aux e0 #[] (by simp)
-
-partial def flatten {α} (e : ExprF α) (prev : List (ArgF α) := []) : ExprF α × List (ArgF α) :=
+public def flatten {α} (e : ExprF α) (prev : List (ArgF α) := []) : ExprF α × List (ArgF α) :=
   match e with
   | .app _ f e => f.flatten (e :: prev)
   | _ => (e, prev)
 
 end ExprF
-
-namespace ArgF
-
-def asOp! {α} [Inhabited α] [Repr α] : ArgF α → OperationF α
-| .op a => a
-| a => panic! s!"{repr a} is not an operation."
-
-def asCat! {α} [Inhabited α] [Repr α] : ArgF α → SyntaxCatF α
-| .cat a => a
-| a => panic! s!"{repr a} is not a syntax category."
-
-def asExpr! {α} [Inhabited α] [Repr α] : ArgF α → ExprF α
-| .expr a => a
-| a => panic! s!"{repr a} is not an expression."
-
-def asType! {α} [Inhabited α] [Repr α] : ArgF α → TypeExprF α
-| .type a => a
-| a => panic! s!"{repr a} is not a type."
-
-def asIdent! {α} [Repr α] : ArgF α → String
-| .ident _ a => a
-| a => panic! s!"{repr a} is not an identifier."
-
-def asOption! {α} [Repr α] : ArgF α → Option (ArgF α)
-| .option _ a => a
-| a => panic! s!"{repr a} is not an option."
-
-def asSeq! {α} [Repr α] : ArgF α → Array (ArgF α)
-| .seq _ a => a
-| a => panic! s!"{repr a} is not an sequence."
-
-def asCommaSepList {α} [Repr α] : ArgF α → Array (ArgF α)
-| .commaSepList _ a => a
-| a => panic! s!"{repr a} is not an comma separated list."
-
-end ArgF
 
 /--
 Source location information in the DDM is defined
@@ -320,7 +277,7 @@ structure SourceRange where
   start : String.Pos.Raw
   /-- One past the end of the range. -/
   stop : String.Pos.Raw
-deriving BEq, Inhabited, Repr
+deriving DecidableEq, Inhabited, Repr
 
 namespace SourceRange
 
@@ -328,7 +285,37 @@ def none : SourceRange := { start := 0, stop := 0 }
 
 def isNone (loc : SourceRange) : Bool := loc.start = 0 ∧ loc.stop = 0
 
+instance : ToFormat SourceRange where
+ format fr := f!"{fr.start}-{fr.stop}"
+
 end SourceRange
+
+inductive Uri where
+  | file (path: String)
+  deriving DecidableEq, Repr, Inhabited
+
+instance : ToFormat Uri where
+ format fr := match fr with | .file path => path
+
+structure FileRange where
+  file: Uri
+  range: Strata.SourceRange
+  deriving DecidableEq, Repr, Inhabited
+
+instance : ToFormat FileRange where
+ format fr := f!"{fr.file}:{fr.range}"
+
+structure File2dRange where
+  file: Uri
+  start: Lean.Position
+  ending: Lean.Position
+  deriving DecidableEq, Repr
+
+instance : ToFormat File2dRange where
+ format fr :=
+    let baseName := match fr.file with
+                    | .file path => (path.splitToList (· == '/')).getLast!
+    f!"{baseName}({fr.start.line}, {fr.start.column})-({fr.ending.line}, {fr.ending.column})"
 
 abbrev Arg := ArgF SourceRange
 abbrev Expr := ExprF SourceRange
@@ -342,7 +329,7 @@ Decidable equality definitions of Expr, Operation and Arg.
 They cannot be naturally derived from 'deriving DecidableEq'. It seems the
 fact that their constructors use Array of themselves makes this hard.
 -/
-def ExprF.beq {α} [BEq α] (e1 e2 : ExprF α) : Bool :=
+private def ExprF.beq {α} [BEq α] (e1 e2 : ExprF α) : Bool :=
   match e1, e2 with
   | .bvar a1 i1, .bvar a2 i2
   | .fvar a1 i1, .fvar a2 i2
@@ -351,7 +338,7 @@ def ExprF.beq {α} [BEq α] (e1 e2 : ExprF α) : Bool :=
   | _, _ => false
 termination_by sizeOf e1
 
-def OperationF.beq {α} [BEq α] (o1 o2 : OperationF α) : Bool :=
+private def OperationF.beq {α} [BEq α] (o1 o2 : OperationF α) : Bool :=
   o1.ann == o2.ann
   && o1.name = o2.name
   && ArgF.array_beq o1.args o2.args
@@ -360,7 +347,7 @@ decreasing_by
   simp [OperationF.sizeOf_spec]
   omega
 
-def ArgF.beq {α} [BEq α] (a1 a2 : ArgF α) : Bool :=
+private def ArgF.beq {α} [BEq α] (a1 a2 : ArgF α) : Bool :=
   match a1, a2 with
   | .op o1, .op o2 => OperationF.beq o1 o2
   | .cat c1, .cat c2 => c1 == c2
@@ -375,14 +362,12 @@ def ArgF.beq {α} [BEq α] (a1 a2 : ArgF α) : Bool :=
     | .none, .none => true
     | .some v1, .some v2 => ArgF.beq v1 v2
     | _, _ => false
-  | .seq a1 v1, .seq a2 v2 =>
-    a1 == a2 && ArgF.array_beq v1 v2
-  | .commaSepList a1 v1, .commaSepList a2 v2 =>
-    a1 == a2 && ArgF.array_beq v1 v2
+  | .seq a1 sep1 v1, .seq a2 sep2 v2 =>
+    a1 == a2 && sep1 == sep2 && ArgF.array_beq v1 v2
   | _, _ => false
 termination_by sizeOf a1
 
-def ArgF.array_beq {α} [BEq α] (a1 a2 : Array (ArgF α)) : Bool :=
+private def ArgF.array_beq {α} [BEq α] (a1 a2 : Array (ArgF α)) : Bool :=
   if size_eq : a1.size = a2.size then
     a1.size.all fun i p => ArgF.beq a1[i] a2[i]
   else
@@ -391,21 +376,23 @@ termination_by sizeOf a1
 
 end
 
--- TODO: extend these to LawfulBEq!
-instance {α} [BEq α] : BEq (ExprF α) where beq := ExprF.beq
-instance {α} [BEq α] : BEq (OperationF α) where beq := OperationF.beq
-instance {α} [BEq α] : BEq (ArgF α) where beq := ArgF.beq
+-- TODO: extend these to DecidableEq
+instance {α} [BEq α] : BEq (ExprF α) where beq := private ExprF.beq
+instance {α} [BEq α] : BEq (OperationF α) where beq := private OperationF.beq
+instance {α} [BEq α] : BEq (ArgF α) where beq := private ArgF.beq
 
 inductive MetadataArg where
 | bool (e : Bool)
 | catbvar (index : Nat) -- This is a deBrujin index into current typing environment.
 | num (e : Nat)
 | option (a : Option MetadataArg)
+| functionTemplate (t : FunctionTemplate) -- Function template for datatype declarations
 deriving BEq, Inhabited, Repr
 
 namespace MetadataArg
 
-protected def decEq (x y : MetadataArg) : Decidable (x = y) :=
+@[instance]
+protected def instDecidableEq (x y : MetadataArg) : Decidable (x = y) :=
   match x with
   | .bool x =>
     match y with
@@ -414,7 +401,7 @@ protected def decEq (x y : MetadataArg) : Decidable (x = y) :=
         .isTrue (congrArg _ p)
       else
         .isFalse (by grind)
-    | .catbvar _ | .num _ | .option _ => .isFalse (by grind)
+    | .catbvar _ | .num _ | .option _ | .functionTemplate _ => .isFalse (by grind)
   | .catbvar x =>
     match y with
     | .catbvar y =>
@@ -422,7 +409,7 @@ protected def decEq (x y : MetadataArg) : Decidable (x = y) :=
         .isTrue (congrArg _ p)
       else
         .isFalse (by grind)
-    | .bool _ | .num _ | .option _ => .isFalse (by grind)
+    | .bool _ | .num _ | .option _ | .functionTemplate _ => .isFalse (by grind)
   | .num x =>
     match y with
     | .num y =>
@@ -430,20 +417,26 @@ protected def decEq (x y : MetadataArg) : Decidable (x = y) :=
         .isTrue (congrArg _ p)
       else
         .isFalse (by grind)
-    | .bool _ | .catbvar _ | .option _ => .isFalse (by grind)
+    | .bool _ | .catbvar _ | .option _ | .functionTemplate _ => .isFalse (by grind)
   | .option x =>
     match y with
     | .option y =>
       match x, y with
       | none, none => .isTrue (by grind)
       | some x, some y =>
-        match MetadataArg.decEq x y with
+        match MetadataArg.instDecidableEq x y with
         | .isTrue p => .isTrue (by grind)
         | .isFalse p => .isFalse (by grind)
       | none, some _ | some _, none => .isFalse (by grind)
-    | .bool _ | .catbvar _ | .num _ => .isFalse (by grind)
-
-instance : DecidableEq MetadataArg := MetadataArg.decEq
+    | .bool _ | .catbvar _ | .num _ | .functionTemplate _ => .isFalse (by grind)
+  | .functionTemplate x =>
+    match y with
+    | .functionTemplate y =>
+      if p : x = y then
+        .isTrue (congrArg _ p)
+      else
+        .isFalse (by intro h; injection h; contradiction)
+    | .bool _ | .catbvar _ | .num _ | .option _ => .isFalse (by grind)
 
 end MetadataArg
 
@@ -454,17 +447,11 @@ deriving DecidableEq, Inhabited, Repr
 
 namespace MetadataAttr
 
-def scopeName := q`StrataDDL.scope
+private def scopeName := q`StrataDDL.scope
 
 /-- Create scope using deBrujin index of environment. -/
 def scope (idx : Nat) : MetadataAttr :=
   { ident := scopeName, args := #[.catbvar idx ] }
-
-def declare (varIndex typeIndex : Nat) : MetadataAttr :=
-  { ident := q`StrataDDL.declare, args := #[.catbvar varIndex, .catbvar typeIndex]}
-
-def declareFn (varIndex bindingsIndex typeIndex : Nat) : MetadataAttr :=
-  { ident := q`StrataDDL.declareFn, args := #[.catbvar varIndex, .catbvar bindingsIndex, .catbvar typeIndex]}
 
 end MetadataAttr
 
@@ -479,40 +466,51 @@ protected def emptyWithCapacity (c : Nat) : Metadata := { toArray := .emptyWithC
 
 protected def empty : Metadata := .emptyWithCapacity 0
 
+instance : EmptyCollection Metadata where
+  emptyCollection := .empty
+
 protected def push (md : Metadata) (attr : MetadataAttr) : Metadata :=
   .ofArray <| md.toArray.push attr
 
 instance : Inhabited Metadata where
-  default := .empty
+  default := {}
 
 def isEmpty (md : Metadata) := md.toArray.isEmpty
 
 def toList (m : Metadata) : List MetadataAttr := m.toArray.toList
 
 instance : Membership QualifiedIdent Metadata where
-  mem md x := md.toArray.any fun a => a.ident = x
+  mem md x := private md.toArray.any fun a => a.ident = x
 
-instance (x : QualifiedIdent) (md : Metadata) : Decidable (x ∈ md) := by
+@[instance]
+def instDecidableMem (x : QualifiedIdent) (md : Metadata) : Decidable (x ∈ md) := by
   apply instDecidableEqBool
 
 instance : GetElem? Metadata QualifiedIdent (Array MetadataArg) (fun md i => i ∈ md) where
-  getElem md i _p :=
+  getElem md i _p := private
     match md.toArray.find? (·.ident = i) with
     | none => default
     | some a => a.args
-  getElem? md i :=
+  getElem? md i := private
     match md.toArray.find? (·.ident = i) with
     | none => none
     | some a => a.args
 
-def scopeIndex (metadata : Metadata) : Option Nat :=
+private def scopeIndex (metadata : Metadata) : Option Nat :=
   match metadata[MetadataAttr.scopeName]? with
   | none => none
   | some #[.catbvar idx] => some idx
   | some _ => panic! s!"Unexpected argument count to {MetadataAttr.scopeName.fullName}"
 
+/-- Returns the datatype scope indices (nameIndex, typeParamsIndex) if @[scopeDatatype] is present. -/
+def scopeDatatypeIndex (metadata : Metadata) : Option (Nat × Nat) :=
+  match metadata[q`StrataDDL.scopeDatatype]? with
+  | none => none
+  | some #[.catbvar nameIdx, .catbvar typeParamsIdx] => some (nameIdx, typeParamsIdx)
+  | some _ => panic! s!"Unexpected argument count to scopeDatatype"
+
 /-- Returns the index of the value in the binding for the given variable of the scope to use. -/
-def resultIndex (metadata : Metadata) : Option Nat :=
+private def resultIndex (metadata : Metadata) : Option Nat :=
   match metadata[MetadataAttr.scopeName]? with
   | none => none
   | some #[.catbvar idx] =>
@@ -633,16 +631,11 @@ def mkFunApp (name : String) (n : Nat) : SyntaxDef :=
     prec := appPrec
   }
 
-def ofList (atoms : List SyntaxDefAtom) (prec : Nat := maxPrec): SyntaxDef where
+def ofList (atoms : List SyntaxDefAtom) (prec : Nat := maxPrec) : SyntaxDef where
   atoms := atoms.toArray
   prec := prec
 
 end SyntaxDef
-
-/-- Structure that defines a binding introduced by an operation or function. -/
-inductive SyntaxElabType
-| type : PreType → SyntaxElabType
-deriving Repr
 
 structure DebruijnIndex (n : Nat) where
   val : Nat
@@ -653,6 +646,9 @@ namespace DebruijnIndex
 
 def toLevel {n} : DebruijnIndex n → Fin n
 | ⟨v, lt⟩ => ⟨n - (v+1), by omega⟩
+
+protected def ofNat {n : Nat} [NeZero n] (a : Nat) : DebruijnIndex n :=
+  ⟨a % n, Nat.mod_lt _ (Nat.pos_of_neZero n)⟩
 
 end DebruijnIndex
 
@@ -688,7 +684,7 @@ An argument declaration in an operator or function.
 structure ArgDecl where
   ident : Var
   kind : ArgDeclKind
-  metadata : Metadata := .empty
+  metadata : Metadata := {}
 deriving BEq, Inhabited, Repr
 
 structure ArgDecls where
@@ -700,12 +696,15 @@ namespace ArgDecls
 
 protected def empty : ArgDecls := { toArray := #[] }
 
-protected def size (a : ArgDecls) : Nat := a.toArray.size
+instance : EmptyCollection ArgDecls where
+  emptyCollection := .empty
+
+@[expose] protected def size (a : ArgDecls) : Nat := a.toArray.size
 
 protected def isEmpty (a : ArgDecls) : Bool := a.toArray.isEmpty
 
 instance : GetElem ArgDecls Nat ArgDecl fun a i => i < a.size where
-  getElem a i p := a.toArray[i]
+  getElem a i p := private a.toArray[i]
 
 protected def foldl {α} (a : ArgDecls) (f : α → ArgDecl → α) (init : α): α  := a.toArray.foldl f init
 
@@ -720,6 +719,21 @@ def argScopeLevel (argDecls : ArgDecls) (level : Fin argDecls.size) : Option (Fi
       -- TODO: Validate this is checked when attribute parsing occurs.
       let varCount := argDecls.size
       panic! s!"Scope index {idx} out of bounds ({level.val}, varCount = {varCount})"
+
+/-- Returns the datatype scope indices (nameLevel, typeParamsLevel) if @[scopeDatatype] is present.
+    This is used for recursive datatype definitions where the datatype name must be in scope
+    when parsing constructor field types. -/
+def argScopeDatatypeLevel (argDecls : ArgDecls) (level : Fin argDecls.size) : Option (Fin level.val × Fin level.val) :=
+  match argDecls[level].metadata.scopeDatatypeIndex with
+  | none => none
+  | some (nameIdx, typeParamsIdx) =>
+    if h1 : nameIdx < level.val then
+      if h2 : typeParamsIdx < level.val then
+        some (⟨level.val - (nameIdx + 1), by omega⟩, ⟨level.val - (typeParamsIdx + 1), by omega⟩)
+      else
+        panic! s!"scopeDatatype typeParams index {typeParamsIdx} out of bounds ({level.val})"
+    else
+      panic! s!"scopeDatatype name index {nameIdx} out of bounds ({level.val})"
 
 end ArgDecls
 
@@ -746,12 +760,205 @@ structure TypeBindingSpec (argDecls : ArgDecls) where
   defIndex : Option (DebruijnIndex argDecls.size)
 deriving Repr
 
+/-! ## Datatype Type Building Functions -/
+
+/--
+Resolve a type reference to a concrete TypeExpr. A type reference is
+either a datatype, field type (within perField/perConstructor scope),
+or a built-in (e.g. "bool")
+-/
+def resolveTypeRef (ref : TypeRef)
+    (datatypeType : TypeExpr)
+    (fieldType : Option TypeExpr := none)
+    (dialectName : String) : Except String TypeExpr :=
+  match ref with
+  | .datatype => .ok datatypeType
+  | .fieldType =>
+    match fieldType with
+    | some ft => .ok ft
+    | none => .error "TypeRef.fieldType is only valid in perField scope"
+  | .builtin name => .ok <| TypeExprF.ident default ⟨dialectName, name⟩ #[]
+
+/--
+Information about a single constructor in a datatype.
+-/
+structure ConstructorInfo where
+  /-- Constructor name -/
+  name : String
+  /-- Fields as (fieldName, fieldType) pairs -/
+  fields : Array (String × TypeExpr)
+  deriving Repr
+
+/--
+Build a TypeExpr reference to the datatype with type parameters, using
+`.fvar` for the datatype's GlobalContext index.
+-/
+def mkDatatypeTypeRef (ann : SourceRange) (datatypeIndex : FreeVarIndex) (typeParams : Array String) : TypeExpr :=
+  let typeArgs := typeParams.mapIdx fun i _ => TypeExprF.bvar ann i
+  TypeExprF.fvar ann datatypeIndex typeArgs
+
+/--
+Build an arrow type from field types to the datatype type. E.g. for cons,
+creates `a -> List a -> List a`.
+-/
+def mkConstructorType (ann : SourceRange) (datatypeType : TypeExpr) (fields : Array (String × TypeExpr)) : TypeExpr :=
+  fields.foldr (init := datatypeType) fun (_, fieldType) resultType =>
+    TypeExprF.arrow ann fieldType resultType
+
+/--
+Build a function type from parameter types and return type.
+Returns an arrow type: param1 -> param2 -> ... -> returnType
+-/
+def buildFunctionType (template : FunctionTemplate)
+    (datatypeType : TypeExpr)
+    (fieldType : Option TypeExpr)
+    (dialectName : String) : Except String TypeExpr := do
+  -- Resolve all parameter types
+  let paramTypes ← template.paramTypes.mapM fun ref =>
+    resolveTypeRef ref datatypeType fieldType dialectName
+  -- Resolve return type
+  let returnType ← resolveTypeRef template.returnType datatypeType fieldType dialectName
+  -- Build arrow type: param1 -> param2 -> ... -> returnType
+  .ok <| paramTypes.foldr (init := returnType) fun argType tp => .arrow default argType tp
+
+/--
+Result of expanding a single template.
+Contains the generated function signatures and any errors encountered.
+-/
+structure TemplateExpansionResult where
+  /-- Generated function signatures as (name, type) pairs -/
+  functions : Array (String × TypeExpr)
+  /-- Errors encountered during expansion -/
+  errors : Array String
+  deriving Repr
+
+/--
+Expand a single function template based on its scope.
+
+Function templates specify patterns for generating auxiliary functions
+from datatype declarations. This function expands one template according to
+its iteration scope:
+
+- **perConstructor**: Generates one function per constructor (e.g., testers
+like `..isNone`)
+- **perField**: Generates one function per unique field across all constructors
+(e.g., accessors)
+
+**Parameters:**
+- `datatypeName`: Name of the datatype (used in name pattern expansion)
+- `datatypeType`: TypeExpr for the datatype (used in function signatures)
+- `constructorInfo`: Array of constructor information
+- `template`: The function template to expand
+- `dialectName`: Dialect name (for resolving builtin types)
+- `existingNames`: Set of already-used names (for duplicate detection)
+
+**Example:** For a `perConstructor` template defined as:
+```
+perConstructor([.datatype, .literal "..is", .constructor], [.datatype],
+.builtin "bool")
+```
+This specifies:
+- Name pattern: `[.datatype, .literal "..is", .constructor]` → generates names
+like `Option..isNone`
+- Parameter types: `[.datatype]` → takes one parameter of the datatype type
+- Return type: `.builtin "bool"` → returns a boolean
+
+Applied to `Option<T>` with constructors `None` and `Some`, this generates:
+- `Option..isNone : Option<T> -> bool`
+- `Option..isSome : Option<T> -> bool`
+-/
+def expandSingleTemplate
+    (datatypeName : String)
+    (datatypeType : TypeExpr)
+    (constructorInfo : Array ConstructorInfo)
+    (template : FunctionTemplate)
+    (dialectName : String)
+    (existingNames : Std.HashSet String) : TemplateExpansionResult :=
+  -- First validate the pattern
+  match validateNamePattern template.namePattern template.scope with
+  | some err => { functions := #[], errors := #[err] }
+  | none =>
+    match template.scope with
+    | .perConstructor =>
+      -- Generate one function per constructor
+      let (funcs, errs, _) := constructorInfo.foldl (init := (#[], #[], existingNames)) fun (funcs, errs, names) constr =>
+        let funcName := expandNamePattern template.namePattern datatypeName (some constr.name)
+        if names.contains funcName then
+          (funcs, errs.push s!"Duplicate function name: {funcName}", names)
+        else
+          match buildFunctionType template datatypeType none dialectName with
+          | .ok funcType =>
+            (funcs.push (funcName, funcType), errs, names.insert funcName)
+          | .error e =>
+            (funcs, errs.push e, names)
+      { functions := funcs, errors := errs }
+
+    | .perField =>
+      -- Generate one function per unique field across all constructors
+      -- Error if the same field name appears with different types
+      let allFields := constructorInfo.foldl (init := #[]) fun acc c => acc ++ c.fields
+      let (funcs, errs, _) := allFields.foldl (init := (#[], #[], existingNames)) fun (funcs, errs, names) (fieldName, fieldTp) =>
+        let funcName := expandNamePattern template.namePattern datatypeName none (some fieldName)
+        if names.contains funcName then
+          (funcs, errs.push s!"Duplicate field name '{fieldName}' across constructors in datatype '{datatypeName}'", names)
+        else
+          match buildFunctionType template datatypeType (some fieldTp) dialectName with
+          | .ok funcType =>
+            (funcs.push (funcName, funcType), errs, names.insert funcName)
+          | .error e =>
+            (funcs, errs.push e, names)
+      { functions := funcs, errors := errs }
+
+/--
+This function generates function signatures for an array of function templates
+in order. Templates are specified in `@[declareDatatype]` annotations
+to automatically generate auxiliary functions like testers and field accessors.
+Within each template, functions are generated in constructor/field declaration order.
+
+**Parameters:**
+- `datatypeName`: Name of the datatype
+- `datatypeType`: TypeExpr for the datatype
+- `constructorInfo`: Array of constructor information
+- `templates`: Array of function templates to expand
+- `dialectName`: Dialect name (for resolving builtin types)
+- `existingNames`: Optional set of pre-existing names to avoid
+-/
+def expandFunctionTemplates
+    (datatypeName : String)
+    (datatypeType : TypeExpr)
+    (constructorInfo : Array ConstructorInfo)
+    (templates : Array FunctionTemplate)
+    (dialectName : String)
+    (existingNames : Std.HashSet String := {}) : TemplateExpansionResult :=
+  templates.foldl (init := { functions := #[], errors := #[] }) fun acc template =>
+    -- Track names from previous templates to detect cross-template duplicates
+    let currentNames := acc.functions.foldl (init := existingNames) fun s (name, _) => s.insert name
+    let result := expandSingleTemplate datatypeName datatypeType constructorInfo template dialectName currentNames
+    { functions := acc.functions ++ result.functions
+      errors := acc.errors ++ result.errors }
+
+/--
+Specification for datatype declarations.
+Includes indices for extracting datatype information and optional function templates.
+-/
+structure DatatypeBindingSpec (argDecls : ArgDecls) where
+  /-- deBrujin index of datatype name -/
+  nameIndex : DebruijnIndex argDecls.size
+  /-- deBrujin index of type parameters -/
+  typeParamsIndex : DebruijnIndex argDecls.size
+  /-- deBrujin index of constructors -/
+  constructorsIndex : DebruijnIndex argDecls.size
+  /-- Optional list of function templates to expand -/
+  functionTemplates : Array FunctionTemplate := #[]
+  deriving Repr
+
 /-
 A spec for introducing a new binding into a type context.
 -/
 inductive BindingSpec (argDecls : ArgDecls) where
 | value (_ : ValueBindingSpec argDecls)
 | type (_ : TypeBindingSpec argDecls)
+| datatype (_ : DatatypeBindingSpec argDecls)
 deriving Repr
 
 namespace BindingSpec
@@ -759,10 +966,11 @@ namespace BindingSpec
 def nameIndex {argDecls} : BindingSpec argDecls → DebruijnIndex argDecls.size
 | .value v => v.nameIndex
 | .type v => v.nameIndex
+| .datatype v => v.nameIndex
 
 end BindingSpec
 
-abbrev NewBindingM := StateM (Array String)
+private abbrev NewBindingM := StateM (Array String)
 
 private def newBindingErr (msg : String) : NewBindingM Unit :=
   modify (·.push msg)
@@ -795,6 +1003,13 @@ private def mkValueBindingSpec
   if allowCat && argsIndex.isSome then
     newBindingErr "Arguments only allowed when result is a type."
   return { nameIndex, argsIndex, typeIndex, allowCat }
+
+/-- Parse function templates from metadata arguments. -/
+private def parseFunctionTemplates (args : Array MetadataArg) : Array FunctionTemplate :=
+  args.filterMap fun arg =>
+    match arg with
+    | .functionTemplate t => some t
+    | _ => none
 
 def parseNewBindings (md : Metadata) (argDecls : ArgDecls) : Array (BindingSpec argDecls) × Array String :=
   let ins (attr : MetadataAttr) : NewBindingM (Option (BindingSpec argDecls)) := do
@@ -864,6 +1079,31 @@ def parseNewBindings (md : Metadata) (argDecls : ArgDecls) : Array (BindingSpec 
             newBindingErr s!"Scope of definition must match arg scope."
           let defIndex := ⟨defIndex, defP⟩
           some <$> .type <$> pure { nameIndex, argsIndex, defIndex := some defIndex }
+        | { dialect := _, name := "declareDatatype" } => do
+          let args := attr.args
+          if args.size < 3 then
+            newBindingErr "declareDatatype expects at least 3 arguments (name, typeParams, constructors)."
+            return none
+          let .catbvar nameIndex := args[0]!
+            | newBindingErr "declareDatatype: invalid name index"; return none
+          let .catbvar typeParamsIndex := args[1]!
+            | newBindingErr "declareDatatype: invalid typeParams index"; return none
+          let .catbvar constructorsIndex := args[2]!
+            | newBindingErr "declareDatatype: invalid constructors index"; return none
+          let .isTrue nameP := inferInstanceAs (Decidable (nameIndex < argDecls.size))
+            | return panic! "Invalid name index"
+          let .isTrue typeParamsP := inferInstanceAs (Decidable (typeParamsIndex < argDecls.size))
+            | return panic! "Invalid typeParams index"
+          let .isTrue constructorsP := inferInstanceAs (Decidable (constructorsIndex < argDecls.size))
+            | return panic! "Invalid constructors index"
+          -- Parse function templates from remaining arguments (args[3..])
+          let functionTemplates := parseFunctionTemplates (args.extract 3 args.size)
+          some <$> .datatype <$> pure {
+            nameIndex := ⟨nameIndex, nameP⟩,
+            typeParamsIndex := ⟨typeParamsIndex, typeParamsP⟩,
+            constructorsIndex := ⟨constructorsIndex, constructorsP⟩,
+            functionTemplates
+          }
         | _ =>
           pure none
   (md.toArray.filterMapM ins) #[]
@@ -904,7 +1144,7 @@ structure OpDecl where
   /-- Schema for operator -/
   syntaxDef : SyntaxDef
   /-- Metadata for operator. -/
-  metadata : Metadata := .empty
+  metadata : Metadata := {}
   /-- New bindings -/
   newBindings : Array (BindingSpec argDecls) := parseNewBindings! metadata argDecls
 deriving Inhabited, Repr
@@ -912,20 +1152,12 @@ deriving Inhabited, Repr
 namespace OpDecl
 
 instance : BEq OpDecl where
-  beq x y :=
+  beq x y := private
     x.name = y.name
     && x.argDecls == y.argDecls
     && x.category = y.category
     && x.syntaxDef == y.syntaxDef
     && x.metadata == y.metadata
-
-def mk1
-  (name : String)
-  (argDecls : ArgDecls)
-  (category : QualifiedIdent)
-  (syntaxDef : SyntaxDef)
-  (metadata : Metadata) : OpDecl :=
-  { name, argDecls, category, syntaxDef, metadata }
 
 end OpDecl
 
@@ -936,7 +1168,7 @@ structure FunctionDecl where
   argDecls : ArgDecls
   result : PreType
   syntaxDef : SyntaxDef
-  metadata : Metadata := .empty
+  metadata : Metadata := {}
 deriving BEq, Inhabited, Repr
 
 inductive MetadataArgType
@@ -944,6 +1176,7 @@ inductive MetadataArgType
 | ident
 | bool
 | opt (tp : MetadataArgType)
+| functionTemplate  -- Function template for datatype declarations
 deriving DecidableEq, Inhabited, Repr
 
 structure MetadataArgDecl where
@@ -992,7 +1225,7 @@ structure Collection (α : Type) where
 namespace Collection
 
 instance {m α} : ForIn m (Collection α) α where
-  forIn c i f := do
+  forIn c i f := private do
     let step d _h r :=
           match c.proj d with
           | .some v => f v r
@@ -1008,22 +1241,22 @@ protected def fold {α β} (f : β → α → β) (init : β) (c : Collection α
   c.declarations.foldl step init
 
 instance {α} : ToString (Collection α) where
-  toString c :=
+  toString c := private
     let step i a :=
           let r := if i.fst then i.snd else i.snd ++ ", "
           (false, r ++ c.pretty a)
     (c.fold step (true, "{") |>.snd) ++ "}"
 
-inductive Mem {α} (c : Collection α) (nm : String) : Prop
+private inductive Mem {α} (c : Collection α) (nm : String) : Prop
 | intro : (h : nm ∈ c.cache) → (r : α) → c.proj (c.cache[nm]) = some r → Mem c nm
 
-def Mem.inCache {α} {c : Collection α} {nm} : Mem c nm → nm ∈ c.cache
+private def Mem.inCache {α} {c : Collection α} {nm} : Mem c nm → nm ∈ c.cache
 | .intro h _ _ => h
 
 instance {α} : Membership String (Collection α) where
-  mem := Mem
+  mem := private Mem
 
-instance {α} (nm : String) (c : Collection α) : Decidable (nm ∈ c) :=
+def decideMap {α} (nm : String) (c : Collection α) : Decidable (nm ∈ c) :=
   match p : c.cache[nm]? with
   | none => isFalse fun (.intro inCache _ _) => by
     simp [getElem?_def] at p
@@ -1047,10 +1280,33 @@ instance {α} (nm : String) (c : Collection α) : Decidable (nm ∈ c) :=
         | Exists.intro h eq => simp only [eq, q]
       isTrue (Mem.intro inCache z val_eq)
 
-end Collection
+@[instance]
+def instDecidableMem {α} (nm : String) (c : Collection α) : Decidable (nm ∈ c) :=
+  match p : c.cache[nm]? with
+  | none => isFalse fun (.intro inCache _ _) => by
+    simp [getElem?_def] at p
+    contradiction
+  | some d =>
+    match q: c.proj d with
+    | none => isFalse fun (.intro inCache z z_eq) => by
+      simp [getElem?_def] at p
+      match p with
+      | .intro _ eq =>
+        simp only [eq, q] at z_eq
+        contradiction
+    | some z =>
+      have inCache : nm ∈ c.cache := by
+        simp [getElem?_def] at p
+        match p with
+        | Exists.intro i _ => exact i
+      have val_eq : c.proj c.cache[nm] = some z := by
+        simp [getElem?_def] at p
+        match p with
+        | Exists.intro h eq => simp only [eq, q]
+      isTrue (Mem.intro inCache z val_eq)
 
 instance {α} : GetElem? (Collection α) String α (fun c nm => nm ∈ c) where
-  getElem c nm p :=
+  getElem c nm p := private
     have inCache : nm ∈ c.cache := p.inCache
     match q : c.cache[nm] with
     | d =>
@@ -1062,10 +1318,12 @@ instance {α} : GetElem? (Collection α) String α (fun c nm => nm ∈ c) where
         | .intro inCache z h =>
           simp only [q, r] at h
           contradiction
-  getElem? c nm :=
+  getElem? c nm := private
     match c.cache[nm]? with
     | none => none
     | some d => c.proj d
+
+end Collection
 
 /--
 A dialect definition.
@@ -1077,9 +1335,14 @@ structure Dialect where
   declarations : Array Decl := #[]
   cache : Std.HashMap String Decl :=
     declarations.foldl (init := {}) fun m d => m.insert d.name d
-deriving Inhabited
 
 namespace Dialect
+
+instance : Inhabited Dialect where
+  default := {
+    name := default
+    imports := #[]
+  }
 
 instance : BEq Dialect where
   beq x y := x.name = y.name
@@ -1146,25 +1409,17 @@ def addDecl (d : Dialect) (decl : Decl) : Dialect :=
       cache := d.cache.insert name decl
       }
 
-def declareSyntaxCat (d : Dialect) (decl : SynCatDecl) :=
-  d.addDecl (.syncat decl)
-
-def declareType (d : Dialect) (name : String) (argNames : Array (Ann String SourceRange)) :=
-  d.addDecl (.type { name, argNames })
-
-def declareMetadata (d : Dialect) (decl : MetadataDecl) : Dialect :=
-  d.addDecl (.metadata decl)
-
 instance : Membership String Dialect where
-  mem d nm := nm ∈ d.cache
+  mem d nm := private nm ∈ d.cache
 
-instance (nm : String) (d : Dialect) : Decidable (nm ∈ d) :=
+@[instance]
+def instDecidableMem (nm : String) (d : Dialect) : Decidable (nm ∈ d) :=
   inferInstanceAs (Decidable (nm ∈ d.cache))
 
 end Dialect
 
 /-- BEq between two Std HashMap; checked by doing inclusion test twice -/
-instance {α β} [BEq α] [Hashable α] [BEq β]: BEq (Std.HashMap α β) where
+private instance {α β} [BEq α] [Hashable α] [BEq β]: BEq (Std.HashMap α β) where
   beq x y := Id.run do
     if x.size ≠ y.size then
       return false
@@ -1173,31 +1428,58 @@ instance {α β} [BEq α] [Hashable α] [BEq β]: BEq (Std.HashMap α β) where
         return false
     return true
 
+def DialectMap.Closed (map : Std.HashMap DialectName Dialect) :=
+  ∀(d : DialectName) (p: d ∈ map), map[d].imports.all (· ∈ map)
+
 structure DialectMap where
-  map : Std.HashMap DialectName Dialect
-  closed : ∀(d : DialectName) (p: d ∈ map), map[d].imports.all (· ∈ map)
+  private map : Std.HashMap DialectName Dialect
+  private closed : DialectMap.Closed map
 
 namespace DialectMap
 
-instance : BEq DialectMap where
+private instance : BEq DialectMap where
   beq x y := x.map == y.map
 
+protected def empty : DialectMap := { map := {}, closed := fun _ p => by simp at p }
+
 instance : EmptyCollection DialectMap where
-  emptyCollection := { map := {}, closed := by simp }
+  emptyCollection := .empty
 
 instance : Inhabited DialectMap where
-  default := {}
+  default := private .empty
 
 instance : Membership DialectName DialectMap where
-  mem m d := d ∈ m.map
+  mem m d := private d ∈ m.map
 
-instance (d : DialectName) (m : DialectMap) : Decidable (d ∈ m) :=
+@[instance]
+def instDecidableMem (d : DialectName) (m : DialectMap) : Decidable (d ∈ m) :=
   inferInstanceAs (Decidable (d ∈ m.map))
 
 instance : GetElem? DialectMap DialectName Dialect (fun m d => d ∈ m) where
-  getElem m d p := m.map[d]
-  getElem? m d := m.map[d]?
-  getElem! m d := m.map[d]!
+  getElem m d p := private m.map[d]
+  getElem? m d := private m.map[d]?
+  getElem! m d := private m.map[d]!
+
+private theorem insert_preserves_closed
+  (m : Std.HashMap DialectName Dialect)
+  (m_closed : DialectMap.Closed m)
+  (d : Dialect)
+  (d_imports_ok : d.imports.all (· ∈ m))
+  (name : DialectName)
+  (mem : name ∈ m.insert d.name d) :
+      ((m.insert d.name d)[name].imports.all fun x => decide (x ∈ m.insert d.name d)) = true := by
+  if eq : d.name = name then
+    simp at d_imports_ok
+    simp [eq]
+    intro i lt
+    exact Or.inr (d_imports_ok i lt)
+  else
+    simp only [Std.HashMap.mem_insert, eq, beq_iff_eq, false_or] at mem
+    have cl := m_closed name mem
+    simp at cl
+    simp [Std.HashMap.getElem_insert, eq]
+    intro i lt
+    exact Or.inr (cl i lt)
 
 /--
 This inserts a new dialect into the dialect map.
@@ -1207,20 +1489,7 @@ of dialects and imports are already in dialect.
 -/
 def insert (m : DialectMap) (d : Dialect) (_d_new : d.name ∉ m) (d_imports_ok : d.imports.all (· ∈ m)) : DialectMap :=
   { map := m.map.insert d.name d
-    closed := by
-      intro name mem
-      if eq : d.name = name then
-        simp at d_imports_ok
-        simp [eq]
-        intro i lt
-        exact Or.inr (d_imports_ok i lt)
-      else
-        simp only [Std.HashMap.mem_insert, eq, beq_iff_eq, false_or] at mem
-        have cl := m.closed name mem
-        simp at cl
-        simp [Std.HashMap.getElem_insert, eq]
-        intro i lt
-        exact Or.inr (cl i lt)
+    closed := insert_preserves_closed m.map m.closed d d_imports_ok
   }
 
 /--
@@ -1230,10 +1499,10 @@ It panics if a dialect with the same name is already in the map
 or if the dialect imports a dialect not already in the map.
 -/
 def insert! (m : DialectMap) (d : Dialect) : DialectMap :=
-  if d_new : d.name ∈ m then
+  if d_new : d.name ∈ m.map then
     panic! s!"{d.name} already in map."
   else
-    if d_imports_ok : d.imports.all (· ∈ m) then
+    if d_imports_ok : d.imports.all (· ∈ m.map) then
       m.insert d d_new d_imports_ok
     else
       panic! s!"Missing import."
@@ -1242,7 +1511,7 @@ def ofList! (l : List Dialect) : DialectMap :=
   let map : Std.HashMap DialectName Dialect :=
         l.foldl (init := .emptyWithCapacity l.length) fun m d =>
           m.insert d.name d
-  let check := map.toArray.all fun (nm, d) => d.imports.all (· ∈ map)
+  let check := map.toArray.all fun (_, d) => d.imports.all (· ∈ map)
   if p : check then
     { map := map,
       closed := by
@@ -1255,7 +1524,9 @@ def ofList! (l : List Dialect) : DialectMap :=
   else
     panic! "Invalid list"
 
-def toList (m : DialectMap) : List Dialect := m.map.values
+private def toListAux (m : DialectMap) : List Dialect := m.map.values
+
+protected def toList (m : DialectMap) : List Dialect := toListAux m
 
 def decl! (dm : DialectMap) (ident : QualifiedIdent) : Decl :=
   match dm.map[ident.dialect]? with
@@ -1265,21 +1536,16 @@ def decl! (dm : DialectMap) (ident : QualifiedIdent) : Decl :=
     | some decl => decl
     | none => panic! s!"Unknown declaration {ident.fullName}"
 
-def opDecl! (dm : DialectMap) (ident : QualifiedIdent) : OpDecl :=
-  match dm.decl! ident with
-  | .op decl => decl
-  | _ => panic! s!"Unknown operation {ident.fullName}"
-
 /--
 Return set of all dialects that are imported by `dialect`.
 
 This includes transitive imports.
 -/
-partial def importedDialects (dm : DialectMap) (dialect : DialectName) (p : dialect ∈ dm) : DialectMap :=
+private partial def importedDialectsAux (dmm : Std.HashMap DialectName Dialect) (dmm_closed : DialectMap.Closed dmm) (dialect : DialectName) (p : dialect ∈ dmm) : DialectMap :=
     aux {} #[dialect] (by simp; exact p) (by simp)
   where aux (map : Std.HashMap DialectName Dialect)
             (next : Array DialectName)
-            (nextp : ∀name, name ∈ next → name ∈ dm)
+            (nextp : ∀name, name ∈ next → name ∈ dmm)
             (inv : ∀name (mem : name ∈ map), map[name].imports.all (fun i => i ∈ map ∨ i ∈ next))
             : DialectMap :=
           if emptyP : next.isEmpty then
@@ -1304,8 +1570,8 @@ partial def importedDialects (dm : DialectMap) (dialect : DialectName) (p : dial
                   simp only [Array.mem_iff_back_or_pop e next_size_pos] at inv2
                   grind)
             else
-              have name_in_dm : name ∈ dm := nextp name (by grind)
-              let d := dm[name]
+              have name_in_dm : name ∈ dmm := nextp name (by grind)
+              let d := dmm[name]
               aux (map.insert name d) (next.pop ++ d.imports)
                 (by
                   intro nm nm_mem
@@ -1314,7 +1580,7 @@ partial def importedDialects (dm : DialectMap) (dialect : DialectName) (p : dial
                   | .inl nm_mem =>
                     exact nextp _ (Array.of_mem_pop nm_mem)
                   | .inr nm_mem =>
-                    have inv := dm.closed name name_in_dm
+                    have inv := dmm_closed name name_in_dm
                     simp only [Array.all_eq_true'] at inv
                     have inv2 := inv nm nm_mem
                     simp at inv2
@@ -1329,6 +1595,14 @@ partial def importedDialects (dm : DialectMap) (dialect : DialectName) (p : dial
                     intro i lt
                     have mem := Array.mem_iff_back_or_pop (map[n].imports[i]) next_size_pos
                     grind)
+
+/--
+Return set of all dialects that are imported by `dialect`.
+
+This includes transitive imports.
+-/
+partial def importedDialects (dm : DialectMap) (dialect : DialectName) (p : dialect ∈ dm) : DialectMap :=
+  importedDialectsAux dm.map dm.closed dialect p
 
 end DialectMap
 
@@ -1348,36 +1622,38 @@ partial def foldOverArgBindingSpecs {α β}
   | .expr _ | .type _ | .cat _ | .ident .. | .num .. | .decimal .. | .bytes .. | .strlit .. => init
   | .option _ none => init
   | .option _ (some a) => foldOverArgBindingSpecs m f init a
-  | .seq _ a => a.attach.foldl (init := init) fun init ⟨a, _⟩ => foldOverArgBindingSpecs m f init a
-  | .commaSepList _ a => a.attach.foldl (init := init) fun init ⟨a, _⟩ => foldOverArgBindingSpecs m f init a
+  | .seq _ _ a => a.attach.foldl (init := init) fun init ⟨a, _⟩ => foldOverArgBindingSpecs m f init a
 
 /--
 Invoke a function `f` over each of the declaration specifications for an operator.
 -/
-partial def OperationF.foldBindingSpecs {α β}
+private partial def OperationF.foldBindingSpecs {α β}
     (m : DialectMap)
     (f : β → α → ∀{argDecls : ArgDecls}, BindingSpec argDecls → Vector (ArgF α) argDecls.size → β)
     (init : β)
     (op : OperationF α)
     : β :=
-  let decl := m.opDecl! op.name
-  let argDecls := decl.argDecls
-  let args := op.args
-  if h : args.size = argDecls.size then
-    let argsV : Vector (ArgF α) argDecls.size := ⟨args, h⟩
-    let init :=
-      match decl.metadata.resultLevel argDecls.size with
-      | none => init
-      | some lvl => foldOverArgAtLevel m f init argDecls argsV lvl
-    decl.newBindings.foldl (init := init) fun a b => f a op.ann b argsV
-  else
-    @panic _ ⟨init⟩ "Expected arguments to match bindings"
+
+  match m.decl! op.name with
+  | .op decl =>
+    let argDecls := decl.argDecls
+    let args := op.args
+    if h : args.size = argDecls.size then
+      let argsV : Vector (ArgF α) argDecls.size := ⟨args, h⟩
+      let init :=
+        match decl.metadata.resultLevel argDecls.size with
+        | none => init
+        | some lvl => foldOverArgAtLevel m f init argDecls argsV lvl
+      decl.newBindings.foldl (init := init) fun a b => f a op.ann b argsV
+    else
+      @panic _ ⟨init⟩ "Expected arguments to match bindings"
+  | _ => @panic _ ⟨init⟩ s!"Unknown operation {op.name}"
 
 /--
 Invoke a function `f` over a given argument for a function or operation so that
 the result context for that argument can be constructed.
 -/
-partial def foldOverArgAtLevel {α β}
+private partial def foldOverArgAtLevel {α β}
     (m : DialectMap)
     (f : β → α → ∀{argDecls : ArgDecls}, BindingSpec argDecls → Vector (ArgF α) argDecls.size → β)
     (init : β)
@@ -1443,16 +1719,32 @@ partial def resolveBindingIndices { argDecls : ArgDecls } (m : DialectMap) (src 
                 some tp
               | _ => panic! "Bad arg"
     .type params.toList value
+  | .datatype b =>
+    /- For datatypes, resolveBindingIndices only returns the datatype type
+    itself; the constructors and template-generated functions are handled
+    separately in addDatatypeBindings. -/
+    let params : Array String :=
+        let addBinding (a : Array String) (_ : SourceRange) {argDecls : _} (b : BindingSpec argDecls) (args : Vector Arg argDecls.size) :=
+            match args[b.nameIndex.toLevel] with
+            | .ident _ name => a.push name
+            | a => panic! s!"Expected ident for type param {repr a}"
+        foldOverArgAtLevel m addBinding #[] argDecls args b.typeParamsIndex.toLevel
+    .type params.toList none
 
 /--
 Typing environment created from declarations in an environment.
 -/
 structure GlobalContext where
-  nameMap : Std.HashMap Var FreeVarIndex := {}
-  vars : Array (Var × GlobalKind) := #[]
-deriving BEq, Repr
+  nameMap : Std.HashMap Var FreeVarIndex
+  vars : Array (Var × GlobalKind)
+deriving Repr
 
 namespace GlobalContext
+
+instance : EmptyCollection GlobalContext where
+  emptyCollection := private { nameMap := {}, vars := {}}
+
+--deriving instance BEq for GlobalContext
 
 instance : Inhabited GlobalContext where
   default := {}
@@ -1460,10 +1752,9 @@ instance : Inhabited GlobalContext where
 instance : Membership Var GlobalContext where
   mem ctx v := v ∈ ctx.nameMap
 
-theorem mem_def (v : Var) (ctx : GlobalContext) : v ∈ ctx ↔ v ∈ ctx.nameMap := by trivial
-
-instance (v : Var) (ctx : GlobalContext) : Decidable (v ∈ ctx) := by
-  rw [mem_def]; infer_instance
+@[instance]
+def instDecidableMem (v : Var) (ctx : GlobalContext) : Decidable (v ∈ ctx) :=
+  inferInstanceAs (Decidable (v ∈ ctx.nameMap))
 
 def push (ctx : GlobalContext) (v : Var) (k : GlobalKind) : GlobalContext :=
   if v ∈ ctx then
@@ -1481,15 +1772,239 @@ def kindOf! (ctx : GlobalContext) (idx : FreeVarIndex) : GlobalKind :=
   assert! idx < ctx.vars.size
   ctx.vars[idx]!.snd
 
+/-!
+## Annotation-based Constructor Info Extraction
+
+The following functions implement constructor info extraction using
+`@[constructor(name, fields)]` and `@[field(name, tp)]` annotations.
+
+The annotation-based approach:
+1. Looks up the operation in the dialect's operation declarations
+2. Checks if the operation has the appropriate metadata annotation
+3. Uses the indices from the annotation to extract the relevant arguments
+-/
+
+/--
+Look up an operation's metadata in the dialect.
+Returns the OpDecl if found, or none if the operation is not in the dialect.
+-/
+private def lookupOpDecl (dialects : DialectMap) (opName : QualifiedIdent) : Option OpDecl :=
+  match dialects[opName.dialect]? with
+  | none => none
+  | some dialect => dialect.ops[opName.name]?
+
+/--
+Check if an operation has the @[constructor(name, fields)] annotation.
+Returns the (nameIndex, fieldsIndex) if present.
+-/
+private def getConstructorAnnotation (opDecl : OpDecl) : Option (Nat × Nat) :=
+  match opDecl.metadata[q`StrataDDL.constructor]? with
+  | some #[.catbvar nameIdx, .catbvar fieldsIdx] => some (nameIdx, fieldsIdx)
+  | _ => none
+
+/--
+Check if an operation has the @[constructorListAtom(c)] annotation.
+Returns the constructor index if present.
+-/
+private def getConstructorListAtomAnnotation (opDecl : OpDecl) : Option Nat :=
+  match opDecl.metadata[q`StrataDDL.constructorListAtom]? with
+  | some #[.catbvar constrIdx] => some constrIdx
+  | _ => none
+
+/--
+Check if an operation has the @[constructorListPush(list, c)] annotation.
+Returns the (listIndex, constructorIndex) if present.
+-/
+private def getConstructorListPushAnnotation (opDecl : OpDecl) : Option (Nat × Nat) :=
+  match opDecl.metadata[q`StrataDDL.constructorListPush]? with
+  | some #[.catbvar listIdx, .catbvar constrIdx] => some (listIdx, constrIdx)
+  | _ => none
+
+/--
+Extract fields from a Bindings argument using the existing @[declare] annotations.
+-/
+private def extractFieldsFromBindings (dialects : DialectMap) (arg : Arg) : Array (String × TypeExpr) :=
+  let addField (acc : Array (String × TypeExpr)) (_ : SourceRange)
+      {argDecls : ArgDecls} (b : BindingSpec argDecls) (args : Vector Arg argDecls.size) : Array (String × TypeExpr) :=
+    match b with
+    | .value vb =>
+      match args[vb.nameIndex.toLevel], args[vb.typeIndex.toLevel] with
+      | .ident _ name, .type tp => acc.push (name, tp)
+      | _, _ => acc
+    | _ => acc
+  foldOverArgBindingSpecs dialects addField #[] arg
+
+/--
+Extract constructor information using the @[constructor] annotation.
+-/
+private def extractSingleConstructor (dialects : DialectMap) (arg : Arg) : Option ConstructorInfo :=
+  match arg with
+  | .op op =>
+    match lookupOpDecl dialects op.name with
+    | none => none
+    | some opDecl =>
+      match getConstructorAnnotation opDecl with
+      | none => none
+      | some (nameIdx, fieldsIdx) =>
+        -- Convert deBruijn indices to levels
+        let argCount := opDecl.argDecls.size
+        if nameIdx < argCount && fieldsIdx < argCount then
+          let nameLevel := argCount - nameIdx - 1
+          let fieldsLevel := argCount - fieldsIdx - 1
+          if h1 : nameLevel < op.args.size then
+            if h2 : fieldsLevel < op.args.size then
+              match op.args[nameLevel] with
+              | .ident _ constrName =>
+                -- Extract fields from the Bindings argument using @[declare] annotations
+                let fields := match op.args[fieldsLevel] with
+                  | .option _ (some bindingsArg) => extractFieldsFromBindings dialects bindingsArg
+                  | .option _ none => #[]
+                  | other => extractFieldsFromBindings dialects other
+                some { name := constrName, fields := fields }
+              | _ => none
+            else none
+          else none
+        else none
+  | _ => none
+
+/--
+This function traverses a constructor list AST node and extracts structured
+information about each constructor, including its name and fields using the
+dialect annotations `@[constructor]`, `@[constructorListAtom]`,
+`@[constructorListPush]`.
+
+**Example:** For `{ None(), Some(value: T) }`, returns:
+```
+#[
+  { name := "None", fields := #[] },
+  { name := "Some", fields := #[("value", <TypeExpr for T>)] }
+]
+```
+-/
+def extractConstructorInfo (dialects : DialectMap) (arg : Arg) : Array ConstructorInfo :=
+  match arg with
+  | .op op =>
+    match lookupOpDecl dialects op.name with
+    | none => #[]
+    | some opDecl =>
+      match getConstructorListAtomAnnotation opDecl with
+      | some constrIdx =>
+        let argCount := opDecl.argDecls.size
+        if constrIdx < argCount then
+          let constrLevel := argCount - constrIdx - 1
+          if h : constrLevel < op.args.size then
+            match extractSingleConstructor dialects op.args[constrLevel] with
+            | some constr => #[constr]
+            | none => #[]
+          else #[]
+        else #[]
+      | none =>
+        match getConstructorListPushAnnotation opDecl with
+        | some (listIdx, constrIdx) =>
+          let argCount := opDecl.argDecls.size
+          if listIdx < argCount && constrIdx < argCount then
+            let listLevel := argCount - listIdx - 1
+            let constrLevel := argCount - constrIdx - 1
+            if h1 : listLevel < op.args.size then
+              if h2 : constrLevel < op.args.size then
+                let prevConstrs := extractConstructorInfo dialects op.args[listLevel]
+                match extractSingleConstructor dialects op.args[constrLevel] with
+                | some constr => prevConstrs.push constr
+                | none => prevConstrs
+              else #[]
+            else #[]
+          else #[]
+        | none =>
+          -- Could be a direct constructor operation
+          match extractSingleConstructor dialects arg with
+          | some constr => #[constr]
+          | none => #[]
+  | _ => #[]
+  decreasing_by
+    simp_wf; rw[OperationF.sizeOf_spec]
+    have := Array.sizeOf_get op.args (opDecl.argDecls.size - listIdx - 1) (by omega); omega
+
+/--
+Add all bindings for a datatype declaration to the GlobalContext when
+`@[declareDatatype]` is encountered. Bindings are 1) the type itself (added as
+`GlobalKind.type`) 2) the constructors (e.g. `a → List a → List a` for `Cons`)
+3) template-generated functions as specified via `perConstructor` or `perFields`
+templates.
+
+The entries are generated in the following order: datatype type, constructors
+in declaration order, then template functions in specification order. The
+FreeVarIndex values are consistent with this order.
+
+**Parameters:**
+- `dialects`: Map of all loaded dialects (needed for annotation lookup)
+- `gctx`: Current GlobalContext to extend
+- `src`: Source location for generated type expressions
+- `dialectName`: Name of the dialect containing the datatype
+- `b`: DatatypeBindingSpec with indices for name, type params, constructors, and templates
+- `args`: Actual arguments from the parsed operation
+
+**Example:** For `datatype Option<T> { None(), Some(value: T) }` with a tester template,
+this adds entries for: `Option` (type), `None` (constructor), `Some` (constructor),
+`Option..isNone` (tester), `Option..isSome` (tester).
+-/
+private def addDatatypeBindings
+    (dialects : DialectMap)
+    (gctx : GlobalContext)
+    (src : SourceRange)
+    (dialectName : DialectName)
+    {argDecls : ArgDecls}
+    (b : DatatypeBindingSpec argDecls)
+    (args : Vector Arg argDecls.size)
+    : GlobalContext :=
+
+  let datatypeName :=
+    match args[b.nameIndex.toLevel] with
+    | .ident _ e => e
+    | a => panic! s!"Expected ident for datatype name {repr a}"
+
+  let typeParams : Array String :=
+    let addBinding (a : Array String) (_ : SourceRange) {argDecls : _} (bs : BindingSpec argDecls) (args : Vector Arg argDecls.size) :=
+        match args[bs.nameIndex.toLevel] with
+        | .ident _ name => a.push name
+        | a => panic! s!"Expected ident for type param {repr a}"
+    foldOverArgAtLevel dialects addBinding #[] argDecls args b.typeParamsIndex.toLevel
+
+  let constructorInfo := extractConstructorInfo dialects args[b.constructorsIndex.toLevel]
+
+  -- Step 1: Add datatype type
+  let gctx := gctx.push datatypeName (GlobalKind.type typeParams.toList none)
+  let datatypeIndex := gctx.vars.size - 1
+  let datatypeType := mkDatatypeTypeRef src datatypeIndex typeParams
+
+  -- Step 2: Add constructor signatures
+  let gctx := constructorInfo.foldl (init := gctx) fun gctx constr =>
+    let constrType := mkConstructorType src datatypeType constr.fields
+    gctx.push constr.name (.expr constrType)
+
+  -- Step 3: Expand and add function templates
+  let existingNames : Std.HashSet String := gctx.nameMap.fold (init := {}) fun s name _ => s.insert name
+  let result := expandFunctionTemplates datatypeName datatypeType constructorInfo b.functionTemplates dialectName existingNames
+
+  if !result.errors.isEmpty then
+    panic! s!"Datatype template expansion errors: {result.errors}"
+  else
+    result.functions.foldl (init := gctx) fun gctx (funcName, funcType) =>
+      gctx.push funcName (.expr funcType)
+
 def addCommand (dialects : DialectMap) (init : GlobalContext) (op : Operation) : GlobalContext :=
-    op.foldBindingSpecs dialects addBinding init
-  where addBinding (gctx : GlobalContext) l _ b args :=
-          let name :=
-                match args[b.nameIndex.toLevel] with
-                | .ident _ e => e
-                | a => panic! s!"Expected ident at {b.nameIndex.toLevel} {repr a}"
-          let kind := resolveBindingIndices dialects l b args
-          gctx.push name kind
+    let dialectName := op.name.dialect
+    op.foldBindingSpecs dialects (addBinding dialectName) init
+  where addBinding (dialectName : DialectName) (gctx : GlobalContext) l {argDecls} (b : BindingSpec argDecls) args :=
+          match b with
+          | .datatype datatypeSpec =>
+            addDatatypeBindings dialects gctx l dialectName datatypeSpec args
+          | _ =>
+            let name :=
+                  match args[b.nameIndex.toLevel] with
+                  | .ident _ e => e
+                  | a => panic! s!"Expected ident at {b.nameIndex.toLevel} {repr a}"
+            let kind := resolveBindingIndices dialects l b args
+            gctx.push name kind
 
 end GlobalContext
 
@@ -1511,7 +2026,7 @@ instance : BEq Program where
   beq x y := x.dialect == y.dialect && x.commands == y.commands
 
 instance : Inhabited Program where
-  default := { dialects := {}, dialect := default }
+  default := private { dialects := .empty, dialect := default }
 
 def addCommand (env : Program) (cmd : Operation) : Program :=
   { env with
@@ -1542,3 +2057,4 @@ macro "sizeOf_op_arg_dec" : tactic =>
 macro_rules | `(tactic| decreasing_trivial) => `(tactic| sizeOf_op_arg_dec)
 
 end Strata
+end

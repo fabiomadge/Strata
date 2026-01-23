@@ -3,9 +3,12 @@
 
   SPDX-License-Identifier: Apache-2.0 OR MIT
 -/
+module
+public import Strata.DDM.AST
+public import Strata.DDM.HNF
+import all Strata.DDM.Util.Array
 
-import Strata.DDM.AST
-
+public section
 namespace Strata
 
 class HasEta (α : Type u) (β : outParam (Type v)) where
@@ -20,16 +23,16 @@ def etaExpand {E T} [HasEta E T] (argTypes : Array (String × T)) (provided : Na
   else
     e
 
-def OfAstM (α : Type _) := Except String α
+@[expose] def OfAstM (α : Type _) := Except String α
 
-instance [ToString α] : ToString (OfAstM α) where
-  toString e :=
+instance {α} [ToString α] : ToString (OfAstM α) where
+  toString e := private
     match e with
     | .error e => e
     | .ok r => toString r
 
-instance [Repr α] : Repr (OfAstM α) where
-  reprPrec e prec :=
+instance {α} [Repr α] : Repr (OfAstM α) where
+  reprPrec e prec := private
     match e with
     | .error e => Repr.addAppParen ("error " ++ reprArg e) prec
     | .ok r => Repr.addAppParen ("ok " ++ reprArg r) prec
@@ -163,27 +166,20 @@ def ofOptionM {α β} [Repr α] [SizeOf α]
       (fun v => { ann := ann, val := some v }) <$> act v (by decreasing_tactic)
   | _ => throwExpected "option" arg
 
-def ofCommaSepByM {α β} [Repr α] [SizeOf α]
-      (arg : ArgF α)
-      (act : ∀(e : ArgF α), sizeOf e < sizeOf arg → OfAstM β)
-      : OfAstM (Ann (Array β) α) :=
-  match arg with
-  | .commaSepList ann a => do
-    let val ← a.attach.mapM fun ⟨v, vIn⟩  => do
-      act v (by decreasing_tactic)
-    pure { ann := ann, val := val }
-  | _ => throwExpected "seq" arg
-
 def ofSeqM {α β} [Repr α] [SizeOf α]
+      (sep : SepFormat)
       (arg : ArgF α)
       (act : ∀(e : ArgF α), sizeOf e < sizeOf arg → OfAstM β)
       : OfAstM (Ann (Array β) α) :=
   match arg with
-  | .seq ann a => do
-    let val ← a.attach.mapM fun ⟨v, vIn⟩ =>
-      act v (by decreasing_tactic)
-    pure { ann := ann, val := val }
-  | _ => throwExpected "seq" arg
+  | .seq ann sep' a =>
+    if sep == sep' then do
+      let val ← a.attach.mapM fun ⟨v, vIn⟩ =>
+        act v (by decreasing_tactic)
+      pure { ann := ann, val := val }
+    else
+      throwExpected sep.toString arg
+  | _ => throwExpected sep.toString arg
 
 /--
 Get the expression at index `lvl` in the arguments.
@@ -225,3 +221,4 @@ def exprEtaArg{Ann α T} [Repr Ann] [HasEta α T] {e : Expr} {n : Nat} (as : Siz
     return HasEta.bvar i
 
 end Strata.OfAstM
+end
