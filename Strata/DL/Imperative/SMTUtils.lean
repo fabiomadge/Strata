@@ -101,9 +101,9 @@ def runSolver (solver : String) (args : Array String) : IO IO.Process.Output := 
     cmd := solver
     args := args
   }
-  -- dbg_trace f!"runSolver: exitcode: {repr output.exitCode}\n\
-  --                         stderr: {repr output.stderr}\n\
-  --                         stdout: {repr output.stdout}"
+  dbg_trace f!"runSolver: exitcode: {repr output.exitCode}\n\
+                            stderr: {repr output.stderr}\n\
+                            stdout: {repr output.stdout}"
   return output
 
 ---------------------------------------------------------------------
