@@ -101,9 +101,9 @@ def runSolver (solver : String) (args : Array String) : IO IO.Process.Output := 
     cmd := solver
     args := args
   }
-  -- dbg_trace f!"runSolver: exitcode: {repr output.exitCode}\n\
-  --                         stderr: {repr output.stderr}\n\
-  --                         stdout: {repr output.stdout}"
+  dbg_trace f!"runSolver: exitcode: {repr output.exitCode}\n\
+                          stderr: {repr output.stderr}\n\
+                          stdout: {repr output.stdout}"
   return output
 
 ---------------------------------------------------------------------
@@ -215,6 +215,7 @@ def solverResult {P : PureExpr} [ToFormat P.Ident]
     let pos := input.find (· == '\n')
     let verdict := input.extract input.startPos pos |>.trimAscii.toString
     let rest := (input.extract pos input.endPos |>.drop 1).toString
+    dbg_trace f!"parseVerdict: verdict={repr verdict}"
     match verdict with
     | "sat" =>
       let rawModel ← parseModelDDM rest
@@ -226,10 +227,14 @@ def solverResult {P : PureExpr} [ToFormat P.Ident]
     | _ => return none
 
   -- Parse results based on which checks are enabled
+  dbg_trace f!"solverResult: satisfiabilityCheck={satisfiabilityCheck} validityCheck={validityCheck}\n\
+               stdout={repr stdout}"
   match ← (if satisfiabilityCheck then parseVerdict stdout else pure (some (.unknown, stdout))) with
   | some (satResult, remaining) =>
     match ← (if validityCheck then parseVerdict remaining else pure (some (.unknown, remaining))) with
-    | some (validityResult, _) => return .ok (satResult, validityResult)
+    | some (validityResult, _) =>
+      dbg_trace f!"solverResult: satResult={satResult.isSat} validityResult={validityResult.isSat}"
+      return .ok (satResult, validityResult)
     | none =>
       let stderr := output.stderr
       let hasExecError := stderr.contains "could not execute external process"

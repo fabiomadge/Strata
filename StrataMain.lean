@@ -661,7 +661,13 @@ def laurelAnalyzeBinaryCommand : Command where
           types := combinedProgram.types ++ laurelProgram.types
         }
 
-    let diagnostics ← Strata.Laurel.verifyToDiagnosticModels combinedProgram laurelVerifyOptions
+    dbg_trace "BEFORE_DIAGNOSTICS"
+    let diagnostics ← try
+      Strata.Laurel.verifyToDiagnosticModels combinedProgram laurelVerifyOptions
+    catch e =>
+      IO.eprintln s!"CAUGHT_EXCEPTION: {e}"
+      pure #[]
+    dbg_trace f!"AFTER_DIAGNOSTICS count={diagnostics.size}"
 
     IO.println s!"==== DIAGNOSTICS ===="
     for diag in diagnostics do
