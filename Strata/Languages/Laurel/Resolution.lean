@@ -163,7 +163,20 @@ def resolveRef (name : Identifier) (source : Option FileRange := none)
 private def containerScopedName (containerName memberName : Identifier) : Identifier :=
   mkId s!"{containerName.text}${memberName.text}"
 
-/-- Extract the UserDefined type name from a resolved target expression by looking up its scope entry. -/
+/-- Look up the declared type of `fieldName` within the scope of the composite
+    type named `typeName`. Returns `none` if the type or field is unknown. -/
+private def fieldTypeInScope (typeName : String) (fieldName : Identifier) : ResolveM (Option HighType) := do
+  let s ← get
+  match s.typeScopes.get? typeName with
+  | some typeScope =>
+    match typeScope.get? fieldName.text with
+    | some (_, node) => pure (some node.getType.val)
+    | none => pure none
+  | none => pure none
+
+/-- Extract the UserDefined type name from a resolved target expression by looking up
+    its scope entry. Handles a local variable and a chained field access (`a#b#c`) by
+    recursing on the inner target then looking the field up in that type's scope. -/
 private def targetTypeName (target : StmtExprMd) : ResolveM (Option String) := do
   let s ← get
   match _h : target.val with
@@ -178,15 +191,9 @@ private def targetTypeName (target : StmtExprMd) : ResolveM (Option String) := d
     match (← targetTypeName inner) with
     | none => pure none
     | some innerTy =>
-      match s.typeScopes.get? innerTy with
-      | none => pure none
-      | some typeScope =>
-        match typeScope.get? fieldName.text with
-        | some (_, node) =>
-          match node.getType.val with
-          | .UserDefined typRef => pure (some typRef.text)
-          | _ => pure none
-        | none => pure none
+      match (← fieldTypeInScope innerTy fieldName) with
+      | some (.UserDefined typRef) => pure (some typRef.text)
+      | _ => pure none
   | _ => pure none
   termination_by sizeOf target
   decreasing_by
@@ -293,13 +300,7 @@ private def incrDecrTargetType (target : VariableMd) : ResolveM (Option HighType
     | none => pure none
   | .Field tgt fieldName =>
     match (← targetTypeName tgt) with
-    | some typeName =>
-      match s.typeScopes.get? typeName with
-      | some typeScope =>
-        match typeScope.get? fieldName.text with
-        | some (_, node) => pure (some node.getType.val)
-        | none => pure none
-      | none => pure none
+    | some typeName => fieldTypeInScope typeName fieldName
     | none => pure none
   | .Declare param => pure (some param.type.val)
 
