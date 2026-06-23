@@ -86,8 +86,12 @@ Methods overridden nowhere keep today's plain `D$m = body` (no dispatcher, no
 def implProcName (typeName methodName : Identifier) : Identifier :=
   {mkId s!"{typeName.text}${methodName.text}$impl" with source := methodName.source}
 
+-- The family predicates below are SHARED with `CheckOverrideRefinement` (the Liskov
+-- pass), so they must be public — see `isVirtualDispatchMethod`.
+public section
+
 /-- Does `ct` declare a method named `mname` (vs inherit it)? -/
-private def declaresMethod (ct : CompositeType) (mname : String) : Bool :=
+def declaresMethod (ct : CompositeType) (mname : String) : Bool :=
   ct.instanceProcedures.any (·.name.text == mname)
 
 /-- The strict descendants of `ancestorName` that DECLARE `mname`, i.e. the
@@ -95,7 +99,7 @@ private def declaresMethod (ct : CompositeType) (mname : String) : Bool :=
     most-derived first (deeper `ancestors`-distance first), so the generated
     `is`-chain tests the most specific type before its supertypes — required
     because a value `is` all of its ancestors. -/
-private def descendantOverriders (model : SemanticModel) (program : Program)
+def descendantOverriders (model : SemanticModel) (program : Program)
     (ancestorName : Identifier) (mname : String) : List CompositeType :=
   let composites := program.types.filterMap fun td =>
     match td with | .Composite ct => some ct | _ => none
@@ -111,6 +115,44 @@ private def descendantOverriders (model : SemanticModel) (program : Program)
     else none
   -- most-derived (longest ancestor chain) first
   (tagged.toArray.qsort (fun a b => a.2 > b.2)).toList.map (·.1)
+
+/-! ### Dynamic-dispatch family predicates (the SINGLE source of truth for both
+    the dispatcher generation here AND the Liskov refinement check in
+    `CheckOverrideRefinement`). Keeping these in ONE place is load-bearing for
+    SOUNDNESS: a method that gets a runtime-tag dispatcher (becomes virtual) MUST
+    also get its override-refinement checked, else dynamic dispatch would run an
+    override whose contract was never verified to refine the parent. The two passes
+    therefore gate on the SAME `isVirtualDispatchMethod`. -/
+
+/-- `mname` declared on `declarerName` is overridden within its inheritance family:
+    some strict descendant declares it, OR some strict ancestor declares it. -/
+def isOverriddenMethod (model : SemanticModel) (program : Program)
+    (declarerName : Identifier) (mname : String) : Bool :=
+  (! (descendantOverriders model program declarerName mname).isEmpty)
+  || ((computeAncestors model declarerName).drop 1).any (fun anc =>
+        anc.instanceProcedures.any (·.name.text == mname))
+
+/-- The `mname` family rooted at `declarerName` involves a GENERIC composite
+    (the declarer's ancestors that declare `m`, or any descendant overrider, carry
+    type parameters). Dynamic dispatch + refinement checking are gated OFF for such
+    families for now: a dispatcher/checker would reference a generic instantiation
+    (`SBox<T>`) that the procedure monomorphizer cannot yet seed from `Box<int>`.
+    Such families keep STATIC dispatch — sound, just not virtual. -/
+def familyIsGeneric (model : SemanticModel) (program : Program)
+    (declarerName : Identifier) (mname : String) : Bool :=
+  (computeAncestors model declarerName).any (fun c =>
+    !c.typeArgs.isEmpty && c.instanceProcedures.any (·.name.text == mname))
+  || (descendantOverriders model program declarerName mname).any (fun c => !c.typeArgs.isEmpty)
+
+/-- THE shared gate: a method dispatched virtually (gets a dispatcher) AND, by the
+    same predicate, gets its override-refinement (Liskov) checked. Both passes call
+    this so the two cannot drift into the unsound "dispatcher without checker" state. -/
+def isVirtualDispatchMethod (model : SemanticModel) (program : Program)
+    (declarerName : Identifier) (mname : String) : Bool :=
+  isOverriddenMethod model program declarerName mname
+    && ! familyIsGeneric model program declarerName mname
+
+end -- public section (shared family predicates)
 
 /-- Build the dispatcher body for `method` on `ownerType`, branching over
     `overriders` (most-derived first) and falling through to `ownerType`'s own
@@ -174,20 +216,14 @@ private def dispatcherPosts (ownerPosts : List Condition) (method : Procedure)
     (overriders : List CompositeType) : List Condition :=
   let src := method.name.source
   let selfName := (method.inputs.head?.map (·.name)).getD (mkId "self")
-  let trueLit : StmtExprMd := ⟨ .LiteralBool true, src ⟩
   let isOf (ct : CompositeType) : StmtExprMd :=
     ⟨ .IsType ⟨ .Var (.Local selfName), src ⟩ ⟨ .UserDefined ct.name, src ⟩, src ⟩
   let overriderPosts : List Condition := overriders.filterMap fun ov =>
     match ov.instanceProcedures.find? (·.name.text == method.name.text) with
     | none => none
     | some ovProc =>
-      let ren : Std.HashMap String Identifier :=
-        (((ovProc.inputs.zip method.inputs) ++ (ovProc.outputs.zip method.outputs)).foldl
-          (fun m (op, dp) => m.insert op.name.text dp.name) {})
-      let rename := mapStmtExpr (fun n => match n.val with
-        | .Var (.Local r) => match ren.get? r.text with
-          | some r' => { n with val := .Var (.Local r') } | none => n
-        | _ => n)
+      -- re-express the overrider's contract in the dispatcher's parameter names
+      let rename := renameProcLocals ovProc method
       let ovPostsAll : List Condition := match ovProc.body with
         | .Opaque posts _ _ => posts
         | .Abstract posts => posts
@@ -195,13 +231,11 @@ private def dispatcherPosts (ownerPosts : List Condition) (method : Procedure)
       match ovPostsAll.filter (fun c => !c.free) with
       | [] => none
       | ovPosts =>
-        let conj : StmtExprMd := ovPosts.foldl
-          (fun acc c => ⟨ .PrimitiveOp .And [acc, rename c.condition], src ⟩) trueLit
-        some { condition := ⟨ .PrimitiveOp .Implies [isOf ov, conj], src ⟩ }
-  let notAnyOverrider : StmtExprMd := overriders.foldl
-    (fun acc ov => ⟨ .PrimitiveOp .And [acc, ⟨ .PrimitiveOp .Not [isOf ov], src ⟩], src ⟩) trueLit
+        let conj := conjoinAnd src (ovPosts.map (fun c => rename c.condition))
+        some { condition := impliesMd src (isOf ov) conj }
+  let notAnyOverrider : StmtExprMd := conjoinAnd src (overriders.map (fun ov => notMd src (isOf ov)))
   let guardedOwnerPosts : List Condition := (ownerPosts.filter (fun c => !c.free)).map fun c =>
-    { c with condition := ⟨ .PrimitiveOp .Implies [notAnyOverrider, c.condition], src ⟩ }
+    { c with condition := impliesMd src notAnyOverrider c.condition }
   guardedOwnerPosts ++ overriderPosts
 
 /-- Apply call-site rewriting to every expression in a procedure. -/
@@ -256,32 +290,20 @@ def liftInstanceProcedures (model : SemanticModel) (program : Program) : Program
   -- Every declarer of a polymorphic `m` emits BOTH `T$m$impl` (its real body) and a
   -- dispatcher `T$m` over its own descendant-overriders — so the `$impl` branch
   -- targets a dispatcher references always exist, even for a leaf override.
-  -- A method participates in dynamic dispatch when it is declared on more than one
-  -- type in an inheritance family (overridden below, or overriding an ancestor).
-  let isOverriddenMethod (declarerName : Identifier) (mname : String) : Bool :=
-    (! (descendantOverriders model program declarerName mname).isEmpty)
-    || ((computeAncestors model declarerName).drop 1).any (fun anc =>
-          anc.instanceProcedures.any (·.name.text == mname))
-  -- Dispatcher generation is gated to NON-GENERIC families for now: a generic
-  -- overrider's `is`/`as` and `$impl` references inside a dispatcher are not yet
-  -- discovered by the procedure monomorphizer (it would need to follow the dispatcher
-  -- body to seed `SBox<int>` from `Box<int>`). Generic inheriting families therefore
-  -- keep STATIC dispatch — sound (the declared type's contract is honored), just not
-  -- yet virtual. Detected by: the declarer or any same-named ancestor/descendant in
-  -- the family carries type parameters.
-  let familyIsGeneric (declarerName : Identifier) (mname : String) : Bool :=
-    (computeAncestors model declarerName).any (fun c =>
-      !c.typeArgs.isEmpty && c.instanceProcedures.any (·.name.text == mname))
-    || (descendantOverriders model program declarerName mname).any (fun c => !c.typeArgs.isEmpty)
-  let isPolymorphicMethod (declarerName : Identifier) (mname : String) : Bool :=
-    isOverriddenMethod declarerName mname && ! familyIsGeneric declarerName mname
+  -- Dispatcher generation uses the SHARED `isVirtualDispatchMethod` gate (defined
+  -- above, also called by `CheckOverrideRefinement`) so the two passes cannot drift
+  -- into a dispatcher-without-Liskov-checker (unsound) state. It is true exactly when
+  -- `m` is overridden in a NON-GENERIC family. (Generic families are gated off for
+  -- now: a dispatcher's `is`/`as`/`$impl` references to a generic instantiation
+  -- `SBox<T>` are not yet discovered by the procedure monomorphizer from `Box<int>`.
+  -- They keep STATIC dispatch — sound, just not virtual.)
   let liftedProcs : List Procedure :=
     program.types.foldl (init := []) fun acc td =>
       match td with
       | .Composite ct =>
         acc ++ ct.instanceProcedures.flatMap fun proc =>
           let tyArgs := ct.typeArgs ++ proc.typeArgs
-          if ! isPolymorphicMethod ct.name proc.name.text then
+          if ! isVirtualDispatchMethod model program ct.name proc.name.text then
             -- monomorphic method ⇒ plain static lift (unchanged behavior)
             [{ proc with name := liftedProcName ct.name proc.name, typeArgs := tyArgs }]
           else

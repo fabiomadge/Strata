@@ -147,6 +147,57 @@ def mapStmtExprM [Monad m] (f : StmtExprMd → m StmtExprMd) (expr : StmtExprMd)
 def mapStmtExpr (f : StmtExprMd → StmtExprMd) (expr : StmtExprMd) : StmtExprMd :=
   (mapStmtExprM (m := Id) f expr)
 
+/-! ### Small boolean-combinator builders + contract param-alignment
+
+Shared by the passes that synthesize obligation expressions (e.g. the Liskov
+refinement checker and the dynamic-dispatch dispatcher), which otherwise hand-roll
+the same `.PrimitiveOp .And/.Implies/.Not` nodes and the same param-renaming map. -/
+
+/-- `a && b` as a `StmtExprMd`. -/
+def andMd (src : Option FileRange) (a b : StmtExprMd) : StmtExprMd :=
+  ⟨ .PrimitiveOp .And [a, b], src ⟩
+
+/-- `a ==> b` as a `StmtExprMd`. -/
+def impliesMd (src : Option FileRange) (a b : StmtExprMd) : StmtExprMd :=
+  ⟨ .PrimitiveOp .Implies [a, b], src ⟩
+
+/-- `!a` as a `StmtExprMd`. -/
+def notMd (src : Option FileRange) (a : StmtExprMd) : StmtExprMd :=
+  ⟨ .PrimitiveOp .Not [a], src ⟩
+
+/-- Conjoin a list of boolean `StmtExprMd`s, `true` if empty. Seeds the fold with
+    the literal `true` (the `.And` identity), so `[p]` is `true && p` and `[]` is
+    `true` — SMT-equivalent to a leading-element fold, used where callers want a
+    uniform shape. (Callers that need free-filtering or to drop the leading `true`
+    should pre-process / seed themselves.) -/
+def conjoinAnd (src : Option FileRange) (es : List StmtExprMd) : StmtExprMd :=
+  es.foldl (andMd src) ⟨ .LiteralBool true, src ⟩
+
+/-- Positional alignment map from a SOURCE procedure's parameter names to a TARGET
+    procedure's, over inputs then outputs (outputs inserted last ⇒ they win a
+    name collision). `zip` truncates to the shorter list, so on arity mismatch
+    surplus source names are left UNMAPPED (a later unresolved reference fails loud
+    rather than silently passing). Used to express one procedure's contract in
+    terms of another's parameters (e.g. a parent method's contract over a child
+    method's names, or an overrider's over a dispatcher's). -/
+def alignParamMap (source target : Procedure) : Std.HashMap String Identifier :=
+  (source.inputs.zip target.inputs ++ source.outputs.zip target.outputs).foldl
+    (fun m st => m.insert st.1.name.text st.2.name) {}
+
+/-- Rename free `.Var (.Local _)` references in an expression from a SOURCE
+    procedure's parameter names to a TARGET procedure's (via `alignParamMap`).
+    ARGUMENT ORDER IS LOAD-BEARING: the contract being rewritten belongs to
+    `source`; it is re-expressed in `target`'s names. Touches only local-variable
+    leaves — never `.Var (.Field _)` receivers, type-level names, or structure. -/
+def renameProcLocals (source target : Procedure) : StmtExprMd → StmtExprMd :=
+  let ren := alignParamMap source target
+  mapStmtExpr (fun n => match n.val with
+    | .Var (.Local r) =>
+      match ren.get? r.text with
+      | some r' => { n with val := .Var (.Local r') }
+      | none => n
+    | _ => n)
+
 /--
 Bottom-up monadic traversal where `post` returns a list of statements, and both
 callbacks are told whether the node's *result is used* (`resultUsed`, threaded
