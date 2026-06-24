@@ -81,8 +81,8 @@ def conjoinConditions (src : Option FileRange) (cs : List Condition) : StmtExprM
     a method that overrides `parent`'s same-named method. Produces up to two
     checkers (pre, post); each is an ordinary opaque procedure whose verification
     is the refinement VC. Returns `[]` when there is nothing to check. -/
-def refinementCheckers (childTypeName : Identifier) (parent child : Procedure)
-    : List Procedure :=
+def refinementCheckers (childTypeName : Identifier) (childTypeArgs : List Identifier)
+    (parent child : Procedure) : List Procedure :=
   let src := child.name.source
   -- Re-express the PARENT's contract in the CHILD's parameter names (load-bearing
   -- argument order: source = parent, target = child).
@@ -97,7 +97,12 @@ def refinementCheckers (childTypeName : Identifier) (parent child : Procedure)
       asserts.map (fun a => ⟨ .Assert { condition := a }, src ⟩)
     let bodyBlock : StmtExprMd := ⟨ .Block assertStmts none, src ⟩
     { name := { mkId s!"{childTypeName.text}${child.name.text}$refines${suffix}" with source := src }
-      typeArgs := []
+      -- Carry the child composite's type params (+ any method-level ones) so a checker
+      -- over a GENERIC override (`self : C<T>`) is indexed as a poly proc by
+      -- `MonomorphizeComposites.indexGenerics` and monomorphized per instantiation —
+      -- mirrors how lifted methods carry `ct.typeArgs ++ proc.typeArgs`. Empty for a
+      -- non-generic family ⇒ byte-identical to before.
+      typeArgs := childTypeArgs ++ child.typeArgs
       inputs := params
       outputs := []
       preconditions := [{ condition := assume }]
@@ -141,7 +146,7 @@ def checkOverrideRefinement (model : SemanticModel) (program : Program) : Progra
           if ! isVirtualDispatchMethod model program ct.name m.name.text then acc2
           else
             match findOverriddenParent model ct.name m.name with
-            | some (_parentName, parentProc) => acc2 ++ refinementCheckers ct.name parentProc m
+            | some (_parentName, parentProc) => acc2 ++ refinementCheckers ct.name ct.typeArgs parentProc m
             | none => acc2
       | _ => acc
   if checkers.isEmpty then program

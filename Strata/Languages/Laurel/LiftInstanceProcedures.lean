@@ -132,27 +132,34 @@ def isOverriddenMethod (model : SemanticModel) (program : Program)
   || ((computeAncestors model declarerName).drop 1).any (fun anc =>
         anc.instanceProcedures.any (·.name.text == mname))
 
-/-- The `mname` family rooted at `declarerName` involves a GENERIC composite
-    (the declarer's ancestors that declare `m`, or any descendant overrider, carry
-    type parameters). Dynamic dispatch + refinement checking are gated OFF for such
-    families for now: a dispatcher/checker would reference a generic instantiation
-    (`SBox<T>`) that the procedure monomorphizer cannot yet seed from `Box<int>`.
-    Such families keep STATIC dispatch — sound, just not virtual. -/
-def familyIsGeneric (model : SemanticModel) (program : Program)
-    (declarerName : Identifier) (mname : String) : Bool :=
-  (computeAncestors model declarerName).any (fun c =>
-    !c.typeArgs.isEmpty && c.instanceProcedures.any (·.name.text == mname))
-  || (descendantOverriders model program declarerName mname).any (fun c => !c.typeArgs.isEmpty)
-
 /-- THE shared gate: a method dispatched virtually (gets a dispatcher) AND, by the
     same predicate, gets its override-refinement (Liskov) checked. Both passes call
-    this so the two cannot drift into the unsound "dispatcher without checker" state. -/
+    this so the two cannot drift into the unsound "dispatcher without checker" state.
+
+    Generic inheriting families ARE supported: the dispatcher's `is`/`as` tag-tests use
+    the applied form (`appliedTagType`, so `self is SBox<T>` not bare `SBox`), and the
+    Liskov checker carries the composite's type params so it monomorphizes per
+    instantiation. (An earlier `familyIsGeneric` clause gated generics off; both gaps
+    are now fixed, so any overridden method — generic or not — is virtual + checked.) -/
 def isVirtualDispatchMethod (model : SemanticModel) (program : Program)
     (declarerName : Identifier) (mname : String) : Bool :=
   isOverriddenMethod model program declarerName mname
-    && ! familyIsGeneric model program declarerName mname
 
 end -- public section (shared family predicates)
+
+/-- The type used in a dispatcher's `is`/`as` tag-test for branch type `ct`: a bare
+    `.UserDefined` for a non-generic composite, but an applied `.Applied ct<T…>` for a
+    generic one (a bare un-applied generic head is rejected by re-resolution's
+    `Synth.isType`). The generic branch shares the dispatcher's type parameters, so
+    `ct` is applied to its OWN declared params as `.TVar`s (which the lifted dispatcher
+    carries). Used by BOTH the dispatcher body (`buildDispatcherBody`) and its
+    tag-conditioned postconditions (`dispatcherPosts`) — keeping the construction in
+    ONE place so the two cannot drift (a drift would mean the posts test a different
+    type than the body dispatches on: a soundness hole or a resolution failure). -/
+private def appliedTagType (src : Option FileRange) (ct : CompositeType) : HighTypeMd :=
+  if ct.typeArgs.isEmpty then ⟨ .UserDefined ct.name, src ⟩
+  else ⟨ .Applied ⟨ .UserDefined ct.name, src ⟩
+        (ct.typeArgs.map (fun a => (⟨ .TVar a, src ⟩ : HighTypeMd))), src ⟩
 
 /-- Build the dispatcher body for `method` on `ownerType`, branching over
     `overriders` (most-derived first) and falling through to `ownerType`'s own
@@ -179,13 +186,8 @@ private def buildDispatcherBody (ownerType : Identifier) (method : Procedure)
     callTo (implProcName ownerType method.name) ⟨ .Var (.Local selfName), src ⟩
   -- fold the overriders into a most-derived-first `is`/`as` chain
   overriders.foldr (init := fallthrough) fun ov acc =>
-    -- A generic overrider must be tested AS an instantiation: `SBox<T> extends Box<T>`
-    -- is tested `self is SBox<T>` (bare `SBox` is rejected as an un-applied generic).
-    -- It shares the owner's type parameters, so apply it to its own declared params as
-    -- `.TVar`s (which are the dispatcher's params after lifting carries them on).
-    let ovTy : HighTypeMd :=
-      if ov.typeArgs.isEmpty then ⟨ .UserDefined ov.name, src ⟩
-      else ⟨ .Applied ⟨ .UserDefined ov.name, src ⟩ (ov.typeArgs.map (fun a => (⟨ .TVar a, src ⟩ : HighTypeMd))), src ⟩
+    -- tag-test type: applied-when-generic (shared with `dispatcherPosts`, see `appliedTagType`)
+    let ovTy : HighTypeMd := appliedTagType src ov
     let isCheck : AstNode StmtExpr := ⟨ .IsType ⟨ .Var (.Local selfName), src ⟩ ovTy, src ⟩
     let castName := mkId s!"$self${ov.name.text}"
     let castDecl : AstNode StmtExpr :=
@@ -216,8 +218,10 @@ private def dispatcherPosts (ownerPosts : List Condition) (method : Procedure)
     (overriders : List CompositeType) : List Condition :=
   let src := method.name.source
   let selfName := (method.inputs.head?.map (·.name)).getD (mkId "self")
+  -- tag-test type shared with the dispatcher body (`appliedTagType`): applied-when-generic,
+  -- so the posts test the SAME type the body dispatches on (must not drift).
   let isOf (ct : CompositeType) : StmtExprMd :=
-    ⟨ .IsType ⟨ .Var (.Local selfName), src ⟩ ⟨ .UserDefined ct.name, src ⟩, src ⟩
+    ⟨ .IsType ⟨ .Var (.Local selfName), src ⟩ (appliedTagType src ct), src ⟩
   let overriderPosts : List Condition := overriders.filterMap fun ov =>
     match ov.instanceProcedures.find? (·.name.text == method.name.text) with
     | none => none
