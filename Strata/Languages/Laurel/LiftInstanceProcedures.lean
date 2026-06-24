@@ -181,9 +181,14 @@ private def buildDispatcherBody (ownerType : Identifier) (method : Procedure)
     | outs =>
       let targets : List (AstNode Variable) := outs.map fun o => ⟨ .Local o.name, src ⟩
       ⟨ .Assign targets call, src ⟩
-  -- the else (fallthrough): owner's own impl, self uncast (already : ownerType)
+  -- the else (fallthrough): owner's own impl, self uncast (already : ownerType).
+  -- Wrapped in a `.Block` so it is STRUCTURALLY symmetric with the `then` branches
+  -- (which are blocks): an `if` synthesizes+joins both branch types, and a bare call
+  -- vs a block-wrapped call can synthesize different types for a void heap-writer
+  -- (whose `$heap`-threaded call resolves to `Heap` bare but `void` as a block tail),
+  -- producing a spurious "'if' branches have incompatible types 'Heap' and 'void'".
   let fallthrough : AstNode StmtExpr :=
-    callTo (implProcName ownerType method.name) ⟨ .Var (.Local selfName), src ⟩
+    ⟨ .Block [callTo (implProcName ownerType method.name) ⟨ .Var (.Local selfName), src ⟩] none, src ⟩
   -- fold the overriders into a most-derived-first `is`/`as` chain
   overriders.foldr (init := fallthrough) fun ov acc =>
     -- tag-test type: applied-when-generic (shared with `dispatcherPosts`, see `appliedTagType`)
