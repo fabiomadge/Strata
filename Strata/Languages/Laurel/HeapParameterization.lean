@@ -622,11 +622,58 @@ def heapTransformProcedure (model: SemanticModel) (proc : Procedure) : Transform
       body := body'
       preconditions := proc.preconditions.map (·.mapCondition lowerAsTypeOnly) }
 
+/-- Make a virtual-dispatch family's heap-status UNIFORM. A dispatcher `T$m` is an
+    if-chain calling each branch's `…$m$impl`; heap-status is computed PER `$impl`, so a
+    mixed family (parent method heap-neutral, an override heap-writing — or vice versa)
+    gives the dispatcher one branch that threads `$heap` (value `Heap`) and one that does
+    not (value `void`), and the two `if` branches fail to type-join ("incompatible types
+    'Heap' and 'void'"). The dispatcher itself is already classified read/write (it calls a
+    reader/writer transitively), so propagate that DOWN: every `$impl` a reader/writer
+    dispatcher calls becomes a reader/writer too, then re-close the transitive fixpoint
+    (a newly-promoted `$impl` may make its own callers heap-touching). Identified
+    structurally — a "dispatcher" is any proc that calls an `…$impl` — not by hard-coding
+    a name shape beyond the `$impl` suffix the lift pass already owns (`implProcName`). -/
+def unifyDispatchFamilyHeap (procs : List Procedure)
+    (readers writers : List Identifier) : List Identifier × List Identifier := Id.run do
+  let info := procs.map fun p => (p.name.text, analyzeProc p)
+  let isImpl (n : String) : Bool := (n.splitOn "$impl").length > 1
+  -- dispatcher → its `$impl` branch targets
+  let implCallees (callees : List Identifier) : List String :=
+    (callees.map (·.text)).filter isImpl
+  -- one promotion round for a given status set: an `$impl` called by an in-set dispatcher joins the set
+  let promote (cur : List String) : List String := Id.run do
+    let mut s := cur
+    for (nm, r) in info do
+      if cur.contains nm then
+        for impl in implCallees r.callees do
+          unless s.contains impl do s := s ++ [impl]
+    return s
+  -- re-close transitivity after promotion (a promoted `$impl`'s callers become heap-touching)
+  let close (seed : List String) : List String := Id.run do
+    let mut cur := seed
+    let mut fuel := procs.length + 1
+    while fuel > 0 do
+      fuel := fuel - 1
+      let next := info.foldl (fun acc (nm, r) =>
+        if acc.contains nm then acc
+        else if (r.callees.map (·.text)).any acc.contains then acc ++ [nm] else acc) cur
+      if next.length == cur.length then fuel := 0 else cur := next
+    return cur
+  let fixStatus (initial : List Identifier) : List Identifier :=
+    let names := close (promote (initial.map (·.text)))
+    procs.filterMap (fun p => if names.contains p.name.text then some p.name else none)
+  return (fixStatus readers, fixStatus writers)
+
 def heapParameterization (model: SemanticModel) (program : Program) : Program :=
   -- Instance procedures are already lifted to `staticProcedures` by an earlier
   -- pass, so they're covered by the calls below.
-  let heapReaders := computeReadsHeap program.staticProcedures
-  let heapWriters := computeWritesHeap program.staticProcedures
+  let heapReaders0 := computeReadsHeap program.staticProcedures
+  let heapWriters0 := computeWritesHeap program.staticProcedures
+  -- Unify each dispatch family's heap-status so a dispatcher's `if` branches agree (see
+  -- `unifyDispatchFamilyHeap`): a mixed-modifies override family would otherwise fail to
+  -- type-join (`Heap` vs `void`) at re-resolution.
+  let (heapReaders, heapWriters) :=
+    unifyDispatchFamilyHeap program.staticProcedures heapReaders0 heapWriters0
   let initState : TransformState := { heapReaders, heapWriters }
   let (procs', state1) := (program.staticProcedures.mapM (heapTransformProcedure model)).run initState
   -- Collect all qualified field names and generate a Field datatype

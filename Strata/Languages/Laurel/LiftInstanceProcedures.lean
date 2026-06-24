@@ -301,11 +301,10 @@ def liftInstanceProcedures (model : SemanticModel) (program : Program) : Program
   -- targets a dispatcher references always exist, even for a leaf override.
   -- Dispatcher generation uses the SHARED `isVirtualDispatchMethod` gate (defined
   -- above, also called by `CheckOverrideRefinement`) so the two passes cannot drift
-  -- into a dispatcher-without-Liskov-checker (unsound) state. It is true exactly when
-  -- `m` is overridden in a NON-GENERIC family. (Generic families are gated off for
-  -- now: a dispatcher's `is`/`as`/`$impl` references to a generic instantiation
-  -- `SBox<T>` are not yet discovered by the procedure monomorphizer from `Box<int>`.
-  -- They keep STATIC dispatch — sound, just not virtual.)
+  -- into a dispatcher-without-Liskov-checker (unsound) state. It is true whenever `m`
+  -- is overridden anywhere in its inheritance family — GENERIC families included
+  -- (their dispatchers/checkers carry the composite's type params and monomorphize via
+  -- the existing machinery; the `is`/`as` tag-tests use the applied form, `appliedTagType`).
   let liftedProcs : List Procedure :=
     program.types.foldl (init := []) fun acc td =>
       match td with

@@ -136,13 +136,12 @@ def checkOverrideRefinement (model : SemanticModel) (program : Program) : Progra
           -- SHARED GATE: emit a refinement checker for EXACTLY the methods that
           -- `LiftInstanceProcedures` will dispatch virtually (`isVirtualDispatchMethod`).
           -- This is the soundness invariant: every virtual method is Liskov-checked, so
-          -- a dynamically-dispatched override can never have an unverified contract. (The
-          -- gate also excludes generic families, for which a checker's `self : C<T>` param
-          -- can't be seeded by the monomorphizer — those keep static dispatch, no checker.)
-          -- Previously these two gates were expressed differently and DIVERGED: a method
-          -- with an `.Applied`-typed parameter got a dispatcher but NO checker, so a
-          -- Liskov-violating override was silently accepted. Driving both off one predicate
-          -- closes that gap.
+          -- a dynamically-dispatched override can never have an unverified contract.
+          -- Generic families are included (the checker carries the composite's type params
+          -- so it monomorphizes per instantiation). Previously these two gates were
+          -- expressed differently and DIVERGED: a method with an `.Applied`-typed parameter
+          -- got a dispatcher but NO checker, so a Liskov-violating override was silently
+          -- accepted. Driving both off one predicate closes that gap.
           if ! isVirtualDispatchMethod model program ct.name m.name.text then acc2
           else
             match findOverriddenParent model ct.name m.name with
