@@ -42,11 +42,13 @@ regression risk to working programs. It runs before monomorphization, so an
 override on a generic composite gets its refinement checked per concrete
 instantiation for free (the checkers monomorphize along with everything else).
 
-`modifies`-subset is intentionally NOT checked here yet: the modifies clause is
-lowered to a quantified frame `ensures` downstream (`ModifiesClauses`), so a
-frame-subset obligation belongs after that lowering; this pass covers the
-pre/post refinement that is the load-bearing half. (See the plan for the frame
-follow-up.)
+`modifies`-subset is enforced as a SIDE EFFECT of the two-state-faithful post-checker
+(see `refinementCheckers`): the post-checker carries the PARENT's modifies and proves
+the parent post over a heap havoc'd per the CHILD's frame, so `ModifiesClauses` emits
+the parent frame-`ensures` on the checker and an override that WIDENS the frame fails
+to re-establish it (a frame-widening override is rejected at definition time — see
+corpus `mixed_modifies_frame_widen_rejected`, which is now also caught here, not only
+at the dispatch call site). This was previously deferred; the `old()` fix subsumed it.
 -/
 
 namespace Strata.Laurel
@@ -58,6 +60,15 @@ namespace Strata.Laurel
 def bodyPostconditions : Body → List Condition
   | .Opaque posts _ _ => posts
   | .Abstract posts => posts
+  | _ => []
+
+/-- The `modifies` clause declared by a procedure body. Only `Opaque` bodies carry
+    one; everything else has an empty frame. Used to give the post-checker's
+    synthesized companion the SAME frame the override declares, so the companion is
+    classified a heap-writer (`HeapParameterization.analyzeProc`: `impl.isNone &&
+    !modif.isEmpty`) and `CallElim` havocs the heap per that frame. -/
+def bodyModifies : Body → List StmtExprMd
+  | .Opaque _ _ modifies => modifies
   | _ => []
 
 /-- A method name appears on a composite's `instanceProcedures`. Find, among
@@ -91,39 +102,85 @@ def refinementCheckers (childTypeName : Identifier) (childTypeArgs : List Identi
   let childPres := child.preconditions.filter (fun c => !c.free)
   let parentPosts := (bodyPostconditions parent.body).filter (fun c => !c.free)
   let childPosts := (bodyPostconditions child.body).filter (fun c => !c.free)
-  let mkChecker (suffix : String) (params : List Parameter)
-      (assume : StmtExprMd) (asserts : List StmtExprMd) : Procedure :=
-    let assertStmts : List StmtExprMd :=
-      asserts.map (fun a => ⟨ .Assert { condition := a }, src ⟩)
-    let bodyBlock : StmtExprMd := ⟨ .Block assertStmts none, src ⟩
-    { name := { mkId s!"{childTypeName.text}${child.name.text}$refines${suffix}" with source := src }
-      -- Carry the child composite's type params (+ any method-level ones) so a checker
-      -- over a GENERIC override (`self : C<T>`) is indexed as a poly proc by
-      -- `MonomorphizeComposites.indexGenerics` and monomorphized per instantiation —
-      -- mirrors how lifted methods carry `ct.typeArgs ++ proc.typeArgs`. Empty for a
-      -- non-generic family ⇒ byte-identical to before.
-      typeArgs := childTypeArgs ++ child.typeArgs
-      inputs := params
-      outputs := []
-      preconditions := [{ condition := assume }]
-      decreases := none
-      isFunctional := false
-      body := .Opaque [] (some bodyBlock) [] }
+  let childModifies := bodyModifies child.body
+  let parentModifies := bodyModifies parent.body
+  -- The shared type-arg list every synthesized proc carries: the child composite's
+  -- type params (+ any method-level ones) so a GENERIC override (`self : C<T>`) is
+  -- indexed as a poly proc by `MonomorphizeComposites.indexGenerics` and monomorphized
+  -- per instantiation — mirrors how lifted methods carry `ct.typeArgs ++ proc.typeArgs`.
+  -- Empty for a non-generic family ⇒ byte-identical to before.
+  let allTypeArgs := childTypeArgs ++ child.typeArgs
   let preChecker : List Procedure :=
     if childPres.isEmpty then []  -- nothing the child demands ⇒ contravariance trivially holds
     else
-      -- assume Parent.pre (renamed), assert each Child.pre
+      -- assume Parent.pre (renamed), assert each Child.pre. The pre-checker is
+      -- single-state (preconditions never reference `old`/the post-heap), so it keeps
+      -- the simple assert-in-body shape — no companion / heap threading needed.
       let assume := conjoinConditions src (parentPres.map
         (fun c => { c with condition := rename c.condition }))
-      [mkChecker "pre" child.inputs assume (childPres.map (·.condition))]
-  let postChecker : List Procedure :=
+      let assertStmts : List StmtExprMd :=
+        (childPres.map (·.condition)).map (fun a => ⟨ .Assert { condition := a }, src ⟩)
+      [{ name := { mkId s!"{childTypeName.text}${child.name.text}$refines$pre" with source := src }
+         typeArgs := allTypeArgs
+         inputs := child.inputs
+         outputs := []
+         preconditions := [{ condition := assume }]
+         decreases := none
+         isFunctional := false
+         body := .Opaque [] (some ⟨ .Block assertStmts none, src ⟩) [] }]
+  -- POST-checker (covariance), TWO-STATE-FAITHFUL. The old buggy encoding emitted the
+  -- checker heap-NEUTRAL (empty modifies, body only `assert`), so `HeapParameterization`
+  -- never gave it an inout `$heap`; `PushOldInward` then collapsed every `old(field)` to
+  -- the current heap, making any two-state Parent/Child post vacuous (assume-false /
+  -- assert-trivial → a Liskov violation slipped through at definition time).
+  --
+  -- Fix (reuses the proven dispatcher-frame mechanism): emit a bodyless `$childspec`
+  -- companion carrying the CHILD's post + modifies, and have the post-checker CALL it,
+  -- then prove the PARENT's post via its own `ensures` (so `ModifiesClauses` conjoins the
+  -- PARENT frame), carrying the PARENT's modifies. The checker, by calling a heap-writer
+  -- companion, becomes a transitive heap-writer → gains an inout `$heap` → `old()`
+  -- survives `PushOldInward`. `CallElim` havocs `$heap` per the companion's (child) frame
+  -- and assumes Child.post; the checker must then re-establish Parent.post AND the parent
+  -- frame over that havoc'd heap. This is the SAME path that already rejects frame-widening
+  -- at dispatch call sites (corpus `mixed_modifies_frame_widen_rejected`).
+  let postCheckers : List Procedure :=
     if parentPosts.isEmpty then []  -- parent guarantees nothing ⇒ covariance trivially holds
     else
-      -- params: inputs ++ outputs (post mentions both). assume Child.post, assert each Parent.post (renamed)
-      let assume := conjoinConditions src childPosts
-      [mkChecker "post" (child.inputs ++ child.outputs) assume
-        (parentPosts.map (fun c => rename c.condition))]
-  preChecker ++ postChecker
+      let specName := mkId s!"{childTypeName.text}${child.name.text}$childspec"
+      let checkerName := mkId s!"{childTypeName.text}${child.name.text}$refines$post"
+      -- Companion: child's signature, child's (renamed-to-itself = identity) post +
+      -- modifies, NO implementation. `impl.isNone && !modif.isEmpty` ⇒ heap-writer.
+      let companion : Procedure :=
+        { name := { specName with source := src }
+          typeArgs := allTypeArgs
+          inputs := child.inputs
+          outputs := child.outputs
+          preconditions := []
+          decreases := none
+          isFunctional := false
+          body := .Opaque childPosts none childModifies }
+      -- Checker body: call `$childspec(selfArgs...)` assigning the outputs, exactly like
+      -- the dispatcher's `callTo`. The call's contract-inlining havocs the heap per the
+      -- companion frame and assumes Child.post.
+      let selfArgs : List (AstNode StmtExpr) :=
+        child.inputs.map fun p => ⟨ .Var (.Local p.name), src ⟩
+      let call : AstNode StmtExpr := ⟨ .StaticCall specName selfArgs, src ⟩
+      let callStmt : AstNode StmtExpr := match child.outputs with
+        | [] => call
+        | outs => ⟨ .Assign (outs.map fun o => ⟨ .Local o.name, src ⟩) call, src ⟩
+      let checker : Procedure :=
+        { name := { checkerName with source := src }
+          typeArgs := allTypeArgs
+          inputs := child.inputs
+          outputs := child.outputs
+          -- prove each Parent.post (renamed into child's names) as the checker's own post
+          preconditions := []
+          decreases := none
+          isFunctional := false
+          body := .Opaque (parentPosts.map (fun c => { c with condition := rename c.condition }))
+                    (some ⟨ .Block [callStmt] none, src ⟩) parentModifies }
+      [companion, checker]
+  preChecker ++ postCheckers
 
 /-- The pass: for every composite method that overrides an ancestor method, append
     the refinement checker procedures to `program.staticProcedures`. -/
