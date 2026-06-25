@@ -173,6 +173,54 @@ def notMd (src : Option FileRange) (a : StmtExprMd) : StmtExprMd :=
 def conjoinAnd (src : Option FileRange) (es : List StmtExprMd) : StmtExprMd :=
   es.foldl (andMd src) ⟨ .LiteralBool true, src ⟩
 
+/-! ### Virtual-dispatch family naming
+
+The synthetic names minted for a virtual-dispatch family, in ONE place so the mint
+sites (LiftInstanceProcedures, CheckOverrideRefinement) and the match site
+(HeapParameterization's `$impl`-detection in `unifyDispatchFamilyHeap`) cannot drift.
+All use `$` as the separator — already a reserved-by-convention synthetic marker
+(`$body`, `$heap`); a user identifier colliding with one of these is caught fail-loud
+at re-resolution (see `LaurelCompilationPipeline`'s duplicate-definition net). -/
+
+/-- Top-level name for a lifted instance method (also the dispatcher name when the
+    method is virtual): `T$m`. -/
+def liftedProcName (typeName methodName : Identifier) : Identifier :=
+  {mkId s!"{typeName.text}${methodName.text}" with source := methodName.source}
+
+/-- The `$impl` marker appended to a method's real (non-dispatcher) implementation.
+    A bare separator-tagged MARKER, NOT a suffix: monomorphization appends its own
+    `$a{n}$…` instantiation tag AFTER it (`Box$get$impl$a1$int`), so callers that
+    DETECT an impl proc must use a substring test (`isImplProc`), never `endsWith`. -/
+def implTag : String := "$impl"
+
+/-- Name for the real implementation of a method on `typeName`, a dispatcher branch
+    target: `T$m$impl`. -/
+def implProcName (typeName methodName : Identifier) : Identifier :=
+  {mkId s!"{typeName.text}${methodName.text}{implTag}" with source := methodName.source}
+
+/-- Does `n` name a method implementation (`…$impl…`)? SUBSTRING test, not `endsWith`:
+    monomorphization appends `$a{n}$…` after `implTag`, so an impl proc's final name is
+    e.g. `Box$get$impl$a1$int`. Used by `unifyDispatchFamilyHeap` to find a dispatcher's
+    `$impl` callees. -/
+def isImplProc (n : String) : Bool := (n.splitOn implTag).length > 1
+
+/-- The local name a dispatcher branch binds for the downcast receiver: `$self$O`. -/
+def dispatchCastName (overriderName : Identifier) : Identifier :=
+  mkId s!"$self${overriderName.text}"
+
+/-- The name of a Liskov refinement checker / its child-spec companion for `child.m`.
+    `suffix` is `"refines$pre"`, `"refines$post"`, or `"childspec"`. -/
+def refinementProcName (childTypeName methodName : Identifier) (suffix : String) : Identifier :=
+  {mkId s!"{childTypeName.text}${methodName.text}${suffix}" with source := methodName.source}
+
+/-- The non-`free` conditions of `cs`. A `free` condition is ASSUMED, not checked, so
+    it is never a guarantee a caller may rely on — every place that turns a contract
+    into an obligation (a dispatcher's conveyed posts, a Liskov pre/post checker) must
+    drop the free ones first. Centralizes the `filter (fun c => !c.free)` the dispatch
+    and refinement passes hand-rolled at several sites. -/
+def nonFreeConditions (cs : List Condition) : List Condition :=
+  cs.filter (fun c => !c.free)
+
 /-- A `StaticCall` to `callee` with `args`, ASSIGNED to `outputs` (one `.Local`
     target each) when the callee returns values, or left as a bare call expression
     when `outputs` is empty. Shared by the dynamic-dispatch dispatcher (each branch

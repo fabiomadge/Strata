@@ -86,7 +86,7 @@ def findOverriddenParent (model : SemanticModel) (childName : Identifier)
     (`true` if none). Used to assume a whole precondition/postcondition set on the
     `requires` side of a checker. Delegates to the shared `conjoinAnd`. -/
 def conjoinConditions (src : Option FileRange) (cs : List Condition) : StmtExprMd :=
-  conjoinAnd src ((cs.filter (fun c => !c.free)).map (·.condition))
+  conjoinAnd src ((nonFreeConditions cs).map (·.condition))
 
 /-- Emit the refinement checker procedures for one override pair. `child` declares
     a method that overrides `parent`'s same-named method. Produces up to two
@@ -98,10 +98,10 @@ def refinementCheckers (childTypeName : Identifier) (childTypeArgs : List Identi
   -- Re-express the PARENT's contract in the CHILD's parameter names (load-bearing
   -- argument order: source = parent, target = child).
   let rename := renameProcLocals parent child
-  let parentPres := parent.preconditions.filter (fun c => !c.free)
-  let childPres := child.preconditions.filter (fun c => !c.free)
-  let parentPosts := (bodyPostconditions parent.body).filter (fun c => !c.free)
-  let childPosts := (bodyPostconditions child.body).filter (fun c => !c.free)
+  let parentPres := nonFreeConditions parent.preconditions
+  let childPres := nonFreeConditions child.preconditions
+  let parentPosts := nonFreeConditions (bodyPostconditions parent.body)
+  let childPosts := nonFreeConditions (bodyPostconditions child.body)
   let childModifies := bodyModifies child.body
   let parentModifies := bodyModifies parent.body
   -- The shared type-arg list every synthesized proc carries: the child composite's
@@ -120,7 +120,7 @@ def refinementCheckers (childTypeName : Identifier) (childTypeArgs : List Identi
         (fun c => { c with condition := rename c.condition }))
       let assertStmts : List StmtExprMd :=
         (childPres.map (·.condition)).map (fun a => ⟨ .Assert { condition := a }, src ⟩)
-      [{ name := { mkId s!"{childTypeName.text}${child.name.text}$refines$pre" with source := src }
+      [{ name := { refinementProcName childTypeName child.name "refines$pre" with source := src }
          typeArgs := allTypeArgs
          inputs := child.inputs
          outputs := []
@@ -146,8 +146,8 @@ def refinementCheckers (childTypeName : Identifier) (childTypeArgs : List Identi
   let postCheckers : List Procedure :=
     if parentPosts.isEmpty then []  -- parent guarantees nothing ⇒ covariance trivially holds
     else
-      let specName := mkId s!"{childTypeName.text}${child.name.text}$childspec"
-      let checkerName := mkId s!"{childTypeName.text}${child.name.text}$refines$post"
+      let specName := refinementProcName childTypeName child.name "childspec"
+      let checkerName := refinementProcName childTypeName child.name "refines$post"
       -- Companion: child's signature, child's (renamed-to-itself = identity) post +
       -- modifies, NO implementation. `impl.isNone && !modif.isEmpty` ⇒ heap-writer.
       let companion : Procedure :=

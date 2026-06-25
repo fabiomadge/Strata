@@ -38,10 +38,6 @@ Then, rewrite caller-side of `obj#proc` to call the lifted procedure
 
 -/
 
-/-- Top-level name produced for a lifted instance procedure. -/
-def liftedProcName (typeName methodName : Identifier) : Identifier :=
-  {mkId s!"{typeName.text}${methodName.text}" with source := methodName.source}
-
 /-- Rewrite a single node so that any callee resolving to an instance procedure
     is replaced by its lifted name. -/
 private def rewriteCallNode (model : SemanticModel) (expr : StmtExprMd) : StmtExprMd :=
@@ -81,11 +77,6 @@ refines its parent's contract, so each branch's impl postcondition implies `D`'s
 Methods overridden nowhere keep today's plain `D$m = body` (no dispatcher, no
 `$impl`), so non-inheriting code is byte-identical. -/
 
-/-- Name for the real (non-virtual) implementation of a method on `typeName`,
-    used as a dispatcher branch target. -/
-def implProcName (typeName methodName : Identifier) : Identifier :=
-  {mkId s!"{typeName.text}${methodName.text}$impl" with source := methodName.source}
-
 -- The family predicates below are SHARED with `CheckOverrideRefinement` (the Liskov
 -- pass), so they must be public — see `isVirtualDispatchMethod`.
 public section
@@ -113,8 +104,16 @@ def descendantOverriders (model : SemanticModel) (program : Program)
       then some (t, anc.length)  -- deeper subtype ⇒ longer ancestor chain
       else none
     else none
-  -- most-derived (longest ancestor chain) first
-  (tagged.toArray.qsort (fun a b => a.2 > b.2)).toList.map (·.1)
+  -- Most-derived (longest ancestor chain) first. `qsort` is NOT stable, so the order
+  -- of equal-distance SIBLINGS would otherwise be an arbitrary quicksort artifact
+  -- sensitive to `program.types` declaration order; the name tiebreaker makes sibling
+  -- dispatch order deterministic and source-order-independent. Sound either way —
+  -- dispatch is by runtime tag, not branch position (a value `is` exactly one sibling's
+  -- type, never two).
+  (tagged.toArray.qsort (fun a b =>
+    if a.2 > b.2 then true
+    else if a.2 < b.2 then false
+    else a.1.name.text < b.1.name.text)).toList.map (·.1)
 
 /-! ### Dynamic-dispatch family predicates (the SINGLE source of truth for both
     the dispatcher generation here AND the Liskov refinement check in
@@ -189,7 +188,7 @@ private def buildDispatcherBody (ownerType : Identifier) (method : Procedure)
     -- tag-test type: applied-when-generic (shared with `dispatcherPosts`, see `appliedTagType`)
     let ovTy : HighTypeMd := appliedTagType src ov
     let isCheck : AstNode StmtExpr := ⟨ .IsType ⟨ .Var (.Local selfName), src ⟩ ovTy, src ⟩
-    let castName := mkId s!"$self${ov.name.text}"
+    let castName := dispatchCastName ov.name
     let castDecl : AstNode StmtExpr :=
       ⟨ .Assign [⟨ .Declare ⟨castName, ovTy⟩, src ⟩]
         ⟨ .AsType ⟨ .Var (.Local selfName), src ⟩ ovTy, src ⟩, src ⟩
@@ -232,13 +231,13 @@ private def dispatcherPosts (ownerPosts : List Condition) (method : Procedure)
         | .Opaque posts _ _ => posts
         | .Abstract posts => posts
         | _ => []
-      match ovPostsAll.filter (fun c => !c.free) with
+      match nonFreeConditions ovPostsAll with
       | [] => none
       | ovPosts =>
         let conj := conjoinAnd src (ovPosts.map (fun c => rename c.condition))
         some { condition := impliesMd src (isOf ov) conj }
   let notAnyOverrider : StmtExprMd := conjoinAnd src (overriders.map (fun ov => notMd src (isOf ov)))
-  let guardedOwnerPosts : List Condition := (ownerPosts.filter (fun c => !c.free)).map fun c =>
+  let guardedOwnerPosts : List Condition := (nonFreeConditions ownerPosts).map fun c =>
     { c with condition := impliesMd src notAnyOverrider c.condition }
   guardedOwnerPosts ++ overriderPosts
 

@@ -631,15 +631,15 @@ def heapTransformProcedure (model: SemanticModel) (proc : Procedure) : Transform
     reader/writer transitively), so propagate that DOWN: every `$impl` a reader/writer
     dispatcher calls becomes a reader/writer too, then re-close the transitive fixpoint
     (a newly-promoted `$impl` may make its own callers heap-touching). Identified
-    structurally — a "dispatcher" is any proc that calls an `…$impl` — not by hard-coding
-    a name shape beyond the `$impl` suffix the lift pass already owns (`implProcName`). -/
+    structurally — a "dispatcher" is any proc that calls an `…$impl…` — not by hard-coding
+    a name shape: the `$impl` marker and its substring (not suffix) detection live in ONE
+    place, `MapStmtExpr.implTag`/`isImplProc`, shared with the mint site (`implProcName`). -/
 def unifyDispatchFamilyHeap (procs : List Procedure)
     (readers writers : List Identifier) : List Identifier × List Identifier := Id.run do
   let info := procs.map fun p => (p.name.text, analyzeProc p)
-  let isImpl (n : String) : Bool := (n.splitOn "$impl").length > 1
   -- dispatcher → its `$impl` branch targets
   let implCallees (callees : List Identifier) : List String :=
-    (callees.map (·.text)).filter isImpl
+    (callees.map (·.text)).filter isImplProc
   -- one promotion round for a given status set: an `$impl` called by an in-set dispatcher joins the set
   let promote (cur : List String) : List String := Id.run do
     let mut s := cur
