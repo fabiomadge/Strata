@@ -175,12 +175,7 @@ private def buildDispatcherBody (ownerType : Identifier) (method : Procedure)
     (method.inputs.drop 1).map fun p => ⟨ .Var (.Local p.name), src ⟩
   -- a call `Target$m$impl(recv, restArgs...)`, assigned to the outputs (if any)
   let callTo (target : Identifier) (recv : AstNode StmtExpr) : AstNode StmtExpr :=
-    let call : AstNode StmtExpr := ⟨ .StaticCall target (recv :: restArgs), src ⟩
-    match method.outputs with
-    | [] => call
-    | outs =>
-      let targets : List (AstNode Variable) := outs.map fun o => ⟨ .Local o.name, src ⟩
-      ⟨ .Assign targets call, src ⟩
+    mkCallAssigningOutputs src target (recv :: restArgs) method.outputs
   -- the else (fallthrough): owner's own impl, self uncast (already : ownerType).
   -- Wrapped in a `.Block` so it is STRUCTURALLY symmetric with the `then` branches
   -- (which are blocks): an `if` synthesizes+joins both branch types, and a bare call

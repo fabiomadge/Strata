@@ -164,10 +164,7 @@ def refinementCheckers (childTypeName : Identifier) (childTypeArgs : List Identi
       -- companion frame and assumes Child.post.
       let selfArgs : List (AstNode StmtExpr) :=
         child.inputs.map fun p => ⟨ .Var (.Local p.name), src ⟩
-      let call : AstNode StmtExpr := ⟨ .StaticCall specName selfArgs, src ⟩
-      let callStmt : AstNode StmtExpr := match child.outputs with
-        | [] => call
-        | outs => ⟨ .Assign (outs.map fun o => ⟨ .Local o.name, src ⟩) call, src ⟩
+      let callStmt : AstNode StmtExpr := mkCallAssigningOutputs src specName selfArgs child.outputs
       let checker : Procedure :=
         { name := { checkerName with source := src }
           typeArgs := allTypeArgs
