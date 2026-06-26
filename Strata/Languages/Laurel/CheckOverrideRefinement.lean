@@ -170,8 +170,16 @@ def refinementCheckers (childTypeName : Identifier) (childTypeArgs : List Identi
           typeArgs := allTypeArgs
           inputs := child.inputs
           outputs := child.outputs
-          -- prove each Parent.post (renamed into child's names) as the checker's own post
-          preconditions := []
+          -- ASSUME Parent.pre (renamed into child's names): post-covariance is
+          -- `Parent.pre ⇒ (Child.post ⇒ Parent.post)` — a caller invoking the parent
+          -- contract has already established Parent.pre, so a covariant override whose
+          -- post implies the parent's only UNDER the parent precondition (e.g. parent
+          -- `requires a >= 0 ensures r >= 0`, child `ensures r == a`) must be checked
+          -- with Parent.pre in scope, else it is spuriously over-rejected. (Parent.pre,
+          -- NOT Child.pre — Child.pre is contravariantly weaker; assuming it would be
+          -- unsound. Parent.pre ⇒ Child.pre is enforced separately by the pre-checker.)
+          preconditions := (nonFreeConditions parent.preconditions).map
+            (fun c => { c with condition := rename c.condition })
           decreases := none
           isFunctional := false
           body := .Opaque (parentPosts.map (fun c => { c with condition := rename c.condition }))

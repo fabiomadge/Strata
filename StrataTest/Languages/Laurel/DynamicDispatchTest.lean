@@ -76,6 +76,16 @@ def dynamicDispatchCorpus : List Case := [
   { name := "liskov_sound_override", outcome := .verifies,
     why := "Child.m `ensures r == 2` refines Parent.m `ensures r >= 0` (2>=0) — the override-refinement check passes"
     src := "composite Parent { var x: int\n  procedure m(self: Parent, a: int) returns (r: int) requires a >= 5 opaque ensures r >= 0 { r := 2 };\n}\ncomposite Child extends Parent {\n  procedure m(self: Child, a: int) returns (r: int) requires a >= 0 opaque ensures r == 2 { r := 2 };\n}\nprocedure u() opaque { assert 1 == 1 };" },
+  -- POST-COVARIANCE UNDER THE PARENT PRECONDITION: Child.m `ensures r == a` refines
+  -- Parent.m `ensures r >= 0` ONLY when `a >= 0` (the parent's `requires`). The post-checker
+  -- must ASSUME Parent.pre — else this sound override is spuriously over-rejected. (Was
+  -- over-rejected when the post-checker had `preconditions := []`; regression for that fix.)
+  { name := "liskov_post_covariance_under_parent_pre", outcome := .verifies,
+    why := "`Child.post (r==a)` implies `Parent.post (r>=0)` under `Parent.pre (a>=0)`; the post-checker assumes Parent.pre so the sound override verifies"
+    src := "composite Parent { var x: int\n  procedure m(self: Parent, a: int) returns (r: int) requires a >= 0 opaque ensures r >= 0 { r := a };\n}\ncomposite Child extends Parent {\n  procedure m(self: Child, a: int) returns (r: int) requires a >= 0 opaque ensures r == a { r := a };\n}\nprocedure u() opaque { assert 1 == 1 };" },
+  { name := "liskov_post_covariance_violation_under_pre", outcome := .failsExactly 1,
+    why := "even WITH `Parent.pre (a>=0)` assumed, `Child.post (r==a-100)` can be negative, so it does NOT refine `Parent.post (r>=0)` — must still be REJECTED (the Parent.pre assumption must not weaken the checker into accepting real violations)"
+    src := "composite Parent { var x: int\n  procedure m(self: Parent, a: int) returns (r: int) requires a >= 0 opaque ensures r >= 0 { r := a };\n}\ncomposite Child extends Parent {\n  procedure m(self: Child, a: int) returns (r: int) requires a >= 0 opaque ensures r == a - 100 { r := a - 100 };\n}\nprocedure u() opaque { assert 1 == 1 };" },
   -- SOUNDNESS of multi-level dispatch: a clearly-false assertion must never verify.
   { name := "dispatch_three_level_false", outcome := .failsExactly 1,
     why := "a false assertion (r>=100) on a dynamically-dispatched 3-level call must FAIL — dispatch is sound, not vacuous"
