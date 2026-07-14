@@ -224,9 +224,8 @@ def nonFreeConditions (cs : List Condition) : List Condition :=
 /-- A `StaticCall` to `callee` with `args`, ASSIGNED to `outputs` (one `.Local`
     target each) when the callee returns values, or left as a bare call expression
     when `outputs` is empty. Shared by the dynamic-dispatch dispatcher (each branch
-    calls a `$impl`) and the Liskov post-checker (calls the `$childspec` companion);
-    both previously hand-rolled this identical `.StaticCall` / `.Assign`-over-outputs
-    shape. The void case is left a bare call deliberately — block-wrapping for branch
+    calls a `$impl`) and the Liskov post-checker (calls the `$childspec` companion).
+    The void case is left a bare call deliberately — block-wrapping for branch
     symmetry (a void heap-writer's `$heap`-threaded call) is the caller's concern. -/
 def mkCallAssigningOutputs (src : Option FileRange) (callee : Identifier)
     (args : List StmtExprMd) (outputs : List Parameter) : StmtExprMd :=

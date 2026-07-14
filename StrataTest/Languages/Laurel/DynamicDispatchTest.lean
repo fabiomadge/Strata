@@ -78,8 +78,7 @@ def dynamicDispatchCorpus : List Case := [
     src := "composite Parent { var x: int\n  procedure m(self: Parent, a: int) returns (r: int) requires a >= 5 opaque ensures r >= 0 { r := 2 };\n}\ncomposite Child extends Parent {\n  procedure m(self: Child, a: int) returns (r: int) requires a >= 0 opaque ensures r == 2 { r := 2 };\n}\nprocedure u() opaque { assert 1 == 1 };" },
   -- POST-COVARIANCE UNDER THE PARENT PRECONDITION: Child.m `ensures r == a` refines
   -- Parent.m `ensures r >= 0` ONLY when `a >= 0` (the parent's `requires`). The post-checker
-  -- must ASSUME Parent.pre — else this sound override is spuriously over-rejected. (Was
-  -- over-rejected when the post-checker had `preconditions := []`; regression for that fix.)
+  -- must ASSUME Parent.pre — else this sound override is spuriously over-rejected.
   { name := "liskov_post_covariance_under_parent_pre", outcome := .verifies,
     why := "`Child.post (r==a)` implies `Parent.post (r>=0)` under `Parent.pre (a>=0)`; the post-checker assumes Parent.pre so the sound override verifies"
     src := "composite Parent { var x: int\n  procedure m(self: Parent, a: int) returns (r: int) requires a >= 0 opaque ensures r >= 0 { r := a };\n}\ncomposite Child extends Parent {\n  procedure m(self: Child, a: int) returns (r: int) requires a >= 0 opaque ensures r == a { r := a };\n}\nprocedure u() opaque { assert 1 == 1 };" },
