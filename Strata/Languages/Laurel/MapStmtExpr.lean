@@ -188,9 +188,9 @@ def liftedProcName (typeName methodName : Identifier) : Identifier :=
   {mkId s!"{typeName.text}${methodName.text}" with source := methodName.source}
 
 /-- The `$impl` marker appended to a method's real (non-dispatcher) implementation.
-    A bare separator-tagged MARKER, NOT a suffix: monomorphization appends its own
-    `$a{n}$…` instantiation tag AFTER it (`Box$get$impl$a1$int`), so callers that
-    DETECT an impl proc must use a substring test (`isImplProc`), never `endsWith`. -/
+    Not necessarily a trailing suffix: monomorphization appends its own `$a{n}$…`
+    instantiation tag after it (`Box$get$impl$a1$int`), so callers that DETECT an
+    impl proc must use a substring test (`isImplProc`), never `endsWith`. -/
 def implTag : String := "$impl"
 
 /-- Name for the real implementation of a method on `typeName`, a dispatcher branch

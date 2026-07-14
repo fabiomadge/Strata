@@ -321,7 +321,6 @@ partial def toSMTTerm (E : Env) (bvs : BoundVars) (e : LExpr CoreLParams.mono) (
   | .quant _ _ _ .none _ _ => .error f!"Cannot encode untyped quantifier {e}"
   | .quant _ qk name (.some ty) tr e =>
     let fvarNames := (e.collectFvarNames.map (·.name)).toArray
-    -- Generate base name using global counter to ensure uniqueness across terms.
     -- The `$__` prefix is a reserved-by-CONVENTION marker for internal names; `$` and
     -- `_` are legal identifier characters, so this is not parser-enforced. Uniqueness of
     -- these quantifier-bound names does not rely on the prefix: it comes from the

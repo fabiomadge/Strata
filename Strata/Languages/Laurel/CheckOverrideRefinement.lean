@@ -76,7 +76,7 @@ def bodyModifies : Body → List StmtExprMd
     of the same name — the parent definition this method overrides. -/
 def findOverriddenParent (model : SemanticModel) (childName : Identifier)
     (methodName : Identifier) : Option (Identifier × Procedure) :=
-  -- `computeAncestors` is self-first then ancestors; drop self, search the rest.
+  -- `computeAncestors` is self-first, so drop self before searching.
   let ancestors := (computeAncestors model childName).drop 1
   ancestors.findSome? fun anc =>
     (anc.instanceProcedures.find? (·.name.text == methodName.text)).map

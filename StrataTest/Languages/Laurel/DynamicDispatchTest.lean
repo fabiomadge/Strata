@@ -165,9 +165,9 @@ def dynamicDispatchCorpus : List Case := [
   -- not: a non-linear hierarchy, multi-output / multi-arg methods, a field receiver, a
   -- transitive (in-body) call, the reverse mixed-modifies direction, a non-overridden method
   -- coexisting with an overridden one, and a heap-reading (non-writing) family.
-  -- SIBLING / non-linear hierarchy: two incomparable children both override m. The ONLY
-  -- shape where the dispatcher's most-derived-first `qsort` ordering is load-bearing (every
-  -- other case is a linear chain). A Parent-typed var holding Child2 must run Child2.m.
+  -- SIBLING / non-linear hierarchy: two incomparable children both override m — the only
+  -- shape where the dispatcher's most-derived-first `qsort` ordering is load-bearing. A
+  -- Parent-typed var holding Child2 must run Child2.m.
   { name := "dispatch_sibling_holds_child2", outcome := .verifies,
     why := "Parent with two incomparable overriders C1/C2; a Parent-typed var holding a C2 dispatches to C2.m (r==3) — exercises sibling dispatch (qsort ordering among equal-distance overriders)"
     src := "composite Parent { var x: int\n  procedure m(self: Parent) returns (r: int) opaque ensures r >= 0 { r := 1 };\n}\ncomposite Child1 extends Parent {\n  procedure m(self: Child1) returns (r: int) opaque ensures r == 2 { r := 2 };\n}\ncomposite Child2 extends Parent {\n  procedure m(self: Child2) returns (r: int) opaque ensures r == 3 { r := 3 };\n}\nprocedure u() opaque { var b: Parent := new Child2; var r: int := b#m(); assert r == 3 };" },

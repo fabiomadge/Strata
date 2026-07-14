@@ -633,8 +633,8 @@ def topoSortMonomorphs (mono : List TypeDefinition) : List TypeDefinition := Id.
       | _ => pure ()
     return m
   let mut out : List TypeDefinition := []
-  let mut placed : Std.HashSet Nat := {}        -- emitted entries, by INDEX (so dups both emit)
-  -- visit the entry at `idx`, emitting its in-list parents (by name → first index) first
+  let mut placed : Std.HashSet Nat := {}        -- emitted entries, by INDEX (see above)
+  -- Emit `idx`'s in-list parents (by name → first index) before `idx` itself.
   let rec visit (fuel : Nat) (visiting : Std.HashSet Nat)
       (idx : Nat) (acc : List TypeDefinition × Std.HashSet Nat)
       : List TypeDefinition × Std.HashSet Nat :=
