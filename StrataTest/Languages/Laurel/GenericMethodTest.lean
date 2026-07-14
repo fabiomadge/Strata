@@ -317,12 +317,36 @@ composite IntBox extends Box<int> { var w: int }
 procedure u() opaque { var ib: IntBox := new IntBox; ib#val := 5; var b: Box<int> := ib; var got: int := b#val; assert got == 6 };"},
 
   { name := "as_guarded_downcast_heap_neutral", outcome := .verifies,
-    why := "`if (p is Child) then ... p as Child ...` in a heap-neutral opaque proc on an opaque `Parent` param translates + verifies (was NotYetImplemented before the heap-neutral AsType-lowering fix); the guard discharges the cast's is-obligation"
+    why := "`if (p is Child) then ... p as Child ...` in a heap-neutral opaque proc on an opaque `Parent` param translates + verifies (was NotYetImplemented before the heap-neutral AsType-lowering fix); the guard discharges the cast's is-obligation. The cast VALUE is not asserted here on purpose — `p` is opaque and the proc is heap-neutral, so `c#y` is unconstrained (asserting a concrete value would be genuinely unprovable); the is-obligation is pinned by the `_guard_fails` twin and the cast VALUE by `as_guarded_downcast_value_observed`."
     src := r"
 composite Parent { var x: int }
 composite Child extends Parent { var y: int }
 procedure d(p: Parent) returns (r: int) opaque ensures true { if (p is Child) then { var c: Child := p as Child; r := c#y } else { r := 0 } };
 procedure u() opaque { var b: Parent := new Child; var got: int := d(b); assert 1 == 1 };"},
+
+  { name := "as_guarded_downcast_value_observed", outcome := .verifies,
+    why := "the value THROUGH a guarded downcast is real, not havoc: in a heap-writer, after `c := p as Child` write `c#y := 9` then read back `== 9`. Discriminates on all axes — unguarded fails the is-obligation (`_value_observed_unguarded`), wrong value fails (`_value_observed_wrong`)."
+    src := r"
+composite Parent { var x: int }
+composite Child extends Parent { var y: int }
+procedure d(p: Parent) opaque modifies p { if (p is Child) then { var c: Child := p as Child; c#y := 9; assert c#y == 9 } else { } };
+procedure u() opaque { assert 1 == 1 };"},
+
+  { name := "as_guarded_downcast_value_observed_wrong", outcome := .failsExactly 1,
+    why := "a wrong read after the guarded-downcast write must FAIL — the write-through-cast-then-read is a genuine value obligation, not vacuous"
+    src := r"
+composite Parent { var x: int }
+composite Child extends Parent { var y: int }
+procedure d(p: Parent) opaque modifies p { if (p is Child) then { var c: Child := p as Child; c#y := 9; assert c#y == 8 } else { } };
+procedure u() opaque { assert 1 == 1 };"},
+
+  { name := "as_guarded_downcast_value_observed_unguarded", outcome := .failsExactly 1,
+    why := "the SAME write-through-cast body WITHOUT the `is Child` guard must fail the cast's is-obligation (opaque `Parent` not provably a `Child`) — proves the guard, not just the read, is load-bearing"
+    src := r"
+composite Parent { var x: int }
+composite Child extends Parent { var y: int }
+procedure d(p: Parent) opaque modifies p { var c: Child := p as Child; c#y := 9; assert c#y == 9 };
+procedure u() opaque { assert 1 == 1 };"},
 
   { name := "as_unguarded_downcast_guard_fails", outcome := .failsExactly 1,
     why := "`p as Child` on an opaque `Parent` param (not provably a `Child`) FAILS the lowered is-guard — proves the heap-neutral `as` lowering ran AND the downcast obligation is real"
