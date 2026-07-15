@@ -47,8 +47,8 @@ instantiation for free (the checkers monomorphize along with everything else).
 the parent post over a heap havoc'd per the CHILD's frame, so `ModifiesClauses` emits
 the parent frame-`ensures` on the checker and an override that WIDENS the frame fails
 to re-establish it (a frame-widening override is rejected at definition time — see
-corpus `mixed_modifies_frame_widen_rejected`, which is now also caught here, not only
-at the dispatch call site). This was previously deferred; the `old()` fix subsumed it.
+corpus `mixed_modifies_frame_widen_rejected`, caught here as well as at the dispatch
+call site).
 -/
 
 namespace Strata.Laurel
@@ -128,21 +128,17 @@ def refinementCheckers (childTypeName : Identifier) (childTypeArgs : List Identi
          decreases := none
          isFunctional := false
          body := .Opaque [] (some ⟨ .Block assertStmts none, src ⟩) [] }]
-  -- POST-checker (covariance), TWO-STATE-FAITHFUL. The old buggy encoding emitted the
-  -- checker heap-NEUTRAL (empty modifies, body only `assert`), so `HeapParameterization`
-  -- never gave it an inout `$heap`; `PushOldInward` then collapsed every `old(field)` to
-  -- the current heap, making any two-state Parent/Child post vacuous (assume-false /
-  -- assert-trivial → a Liskov violation slipped through at definition time).
-  --
-  -- Fix (reuses the proven dispatcher-frame mechanism): emit a bodyless `$childspec`
-  -- companion carrying the CHILD's post + modifies, and have the post-checker CALL it,
-  -- then prove the PARENT's post via its own `ensures` (so `ModifiesClauses` conjoins the
-  -- PARENT frame), carrying the PARENT's modifies. The checker, by calling a heap-writer
-  -- companion, becomes a transitive heap-writer → gains an inout `$heap` → `old()`
-  -- survives `PushOldInward`. `CallElim` havocs `$heap` per the companion's (child) frame
-  -- and assumes Child.post; the checker must then re-establish Parent.post AND the parent
-  -- frame over that havoc'd heap. This is the SAME path that already rejects frame-widening
-  -- at dispatch call sites (corpus `mixed_modifies_frame_widen_rejected`).
+  -- POST-checker (covariance), TWO-STATE-FAITHFUL. It MUST be a heap-writer, or a two-state
+  -- post is checked vacuously: a heap-neutral checker gets no inout `$heap`, so `PushOldInward`
+  -- collapses every `old(field)` to the current heap and a `old()`-referencing Liskov violation
+  -- slips through. So (reusing the dispatcher-frame mechanism): emit a bodyless `$childspec`
+  -- companion carrying the CHILD's post + modifies, and have the checker CALL it, then prove the
+  -- PARENT's post via its own `ensures` (so `ModifiesClauses` conjoins the PARENT frame),
+  -- carrying the PARENT's modifies. Calling a heap-writer companion makes the checker a
+  -- transitive heap-writer → gains inout `$heap` → `old()` survives. `CallElim` havocs `$heap`
+  -- per the companion's (child) frame and assumes Child.post; the checker must re-establish
+  -- Parent.post AND the parent frame over that havoc'd heap — the SAME path that rejects
+  -- frame-widening at dispatch call sites (corpus `mixed_modifies_frame_widen_rejected`).
   let postCheckers : List Procedure :=
     if parentPosts.isEmpty then []  -- parent guarantees nothing ⇒ covariance trivially holds
     else
@@ -200,10 +196,9 @@ def checkOverrideRefinement (model : SemanticModel) (program : Program) : Progra
           -- This is the soundness invariant: every virtual method is Liskov-checked, so
           -- a dynamically-dispatched override can never have an unverified contract.
           -- Generic families are included (the checker carries the composite's type params
-          -- so it monomorphizes per instantiation). Previously these two gates were
-          -- expressed differently and DIVERGED: a method with an `.Applied`-typed parameter
-          -- got a dispatcher but NO checker, so a Liskov-violating override was silently
-          -- accepted. Driving both off one predicate closes that gap.
+          -- so it monomorphizes per instantiation). The two gates MUST stay one predicate: if
+          -- they diverged (e.g. a method with an `.Applied`-typed param got a dispatcher but no
+          -- checker) a Liskov-violating override would be silently accepted.
           if ! isVirtualDispatchMethod model program ct.name m.name.text then acc2
           else
             match findOverriddenParent model ct.name m.name with
