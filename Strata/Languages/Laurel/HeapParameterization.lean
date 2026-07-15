@@ -479,10 +479,10 @@ where
     | .AsType t ty =>
         -- `x as T` lowers to a call to the synthesized `downcast$T` helper (defined in
         -- TypeHierarchy, the next pass). Its `requires (x is T)` precondition is discharged
-        -- by PrecondElim as a well-definedness obligation — so this works in a contract
-        -- formula (where the old `{ assert (x is T); x }` block was illegal) as well as a
-        -- body. Falls back to the assert-block only for a target with no base name (should
-        -- not occur for a real composite cast).
+        -- by PrecondElim as a well-definedness obligation — so the cast works in a contract
+        -- formula (which cannot contain a statement `{ assert (x is T); x }` block) as well
+        -- as in a body. Falls back to the assert-block only for a target with no base name
+        -- (should not occur for a real composite cast).
         let t' ← recurseOne t valueUsed
         match highBaseName? ty.val with
         | some tn => return [⟨ .StaticCall (downcastProcName tn) [t'], source ⟩]
