@@ -187,6 +187,13 @@ at re-resolution (see `LaurelCompilationPipeline`'s duplicate-definition net). -
 def liftedProcName (typeName methodName : Identifier) : Identifier :=
   {mkId s!"{typeName.text}${methodName.text}" with source := methodName.source}
 
+/-- Name of the synthesized downcast helper for type `T`: `downcast$T`. Shared by
+    `TypeHierarchy` (which synthesizes `function downcast$T(p: T): T requires (p is T)`)
+    and `HeapParameterization` (whose `AsType` arms emit a call to it), so the emitter
+    and the definition cannot drift. -/
+def downcastProcName (typeName : Identifier) : Identifier :=
+  {mkId s!"downcast${typeName.text}" with source := typeName.source}
+
 /-- The `$impl` marker appended to a method's real (non-dispatcher) implementation.
     Not necessarily a trailing suffix: monomorphization appends its own `$a{n}$…`
     instantiation tag after it (`Box$get$impl$a1$int`), so callers that DETECT an

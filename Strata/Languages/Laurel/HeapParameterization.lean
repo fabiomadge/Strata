@@ -477,10 +477,19 @@ where
     | .New .. => return [exprMd]
     | .ReferenceEquals l r => return [⟨ .ReferenceEquals (← recurseOne l) (← recurseOne r), source ⟩]
     | .AsType t ty =>
+        -- `x as T` lowers to a call to the synthesized `downcast$T` helper (defined in
+        -- TypeHierarchy, the next pass). Its `requires (x is T)` precondition is discharged
+        -- by PrecondElim as a well-definedness obligation — so this works in a contract
+        -- formula (where the old `{ assert (x is T); x }` block was illegal) as well as a
+        -- body. Falls back to the assert-block only for a target with no base name (should
+        -- not occur for a real composite cast).
         let t' ← recurseOne t valueUsed
-        let isCheck := ⟨ .IsType t' ty, source ⟩
-        let assertStmt := ⟨ .Assert { condition := isCheck }, source ⟩
-        return [⟨ .Block [assertStmt, t'] none, source ⟩]
+        match highBaseName? ty.val with
+        | some tn => return [⟨ .StaticCall (downcastProcName tn) [t'], source ⟩]
+        | none =>
+            let isCheck := ⟨ .IsType t' ty, source ⟩
+            let assertStmt := ⟨ .Assert { condition := isCheck }, source ⟩
+            return [⟨ .Block [assertStmt, t'] none, source ⟩]
     | .IsType t ty => return [⟨ .IsType (← recurseOne t) ty, source ⟩]
     | .Quantifier mode p trigger b =>
       let trigger' ← trigger.attach.mapM fun ⟨t, _⟩ => recurseOne t
@@ -524,9 +533,13 @@ where
 def lowerAsTypeOnly (expr : StmtExprMd) : StmtExprMd :=
   mapStmtExpr (fun e => match e.val with
     | .AsType t ty =>
-      let isCheck : StmtExprMd := ⟨ .IsType t ty, e.source ⟩
-      let assertStmt : StmtExprMd := ⟨ .Assert { condition := isCheck }, e.source ⟩
-      ⟨ .Block [assertStmt, t] none, e.source ⟩
+      -- Same `downcast$T` routing as the heap-touching arm (see `heapTransformExpr`).
+      match highBaseName? ty.val with
+      | some tn => ⟨ .StaticCall (downcastProcName tn) [t], e.source ⟩
+      | none =>
+        let isCheck : StmtExprMd := ⟨ .IsType t ty, e.source ⟩
+        let assertStmt : StmtExprMd := ⟨ .Assert { condition := isCheck }, e.source ⟩
+        ⟨ .Block [assertStmt, t] none, e.source ⟩
     | _ => e) expr
 
 def heapTransformProcedure (model: SemanticModel) (proc : Procedure) : TransformM Procedure := do

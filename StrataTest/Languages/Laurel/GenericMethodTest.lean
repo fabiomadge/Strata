@@ -355,6 +355,27 @@ composite Parent { var x: int }
 composite Child extends Parent { var y: int }
 procedure d(p: Parent) returns (r: int) opaque ensures true { var c: Child := p as Child; r := c#y };
 procedure u() opaque { var got: int := d(new Parent); assert 1 == 1 };"},
+
+  -- `as` cast in a CONTRACT position. `as` lowers to a call to the synthesized
+  -- `downcast$T` helper (a pure preconditioned function), so `(p as Child)#y` can appear
+  -- in a postcondition — the old assert-block lowering was statement-shaped and illegal
+  -- in a formula. PrecondElim discharges `downcast$Child`'s `is Child` precondition as a
+  -- well-definedness obligation, guarded here by the `p is Child` antecedent so it holds.
+  { name := "as_in_contract_postcondition", outcome := .verifies,
+    why := "`(p as Child)#y` in a postcondition translates + verifies (downcast$T helper + PrecondElim WD obligation, guarded by `p is Child`); previously NotYetImplemented"
+    src := r"
+composite Parent { var x: int }
+composite Child extends Parent { var y: int }
+procedure d(p: Parent) returns (r: int) opaque ensures (p is Child) ==> (r == (p as Child)#y) { if (p is Child) then { var c: Child := p as Child; r := c#y } else { r := 0 } };
+procedure u() opaque { assert 1 == 1 };"},
+
+  { name := "as_in_contract_postcondition_wrong", outcome := .failsExactly 1,
+    why := "a WRONG postcondition through the downcast (`r == (p as Child)#y + 1`) must FAIL — the contract cast is a real obligation, not vacuous"
+    src := r"
+composite Parent { var x: int }
+composite Child extends Parent { var y: int }
+procedure d(p: Parent) returns (r: int) opaque ensures (p is Child) ==> (r == (p as Child)#y + 1) { if (p is Child) then { var c: Child := p as Child; r := c#y } else { r := 0 } };
+procedure u() opaque { assert 1 == 1 };"},
 ]
 
 def runGenericMethodTest : IO Unit := checkCases genericMethodCorpus
