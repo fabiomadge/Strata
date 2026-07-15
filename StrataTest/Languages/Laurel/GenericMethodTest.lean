@@ -150,6 +150,13 @@ procedure u() opaque { var bi: Box<int> := new Box<int>; bi#tag := 9; var bb: Bo
 composite Base<T> { var tag: T }
 composite Box<T> extends Base<T> { var val: T }
 procedure u() opaque { var b: Box<int> := new Box<int>; b#tag := 5; var p: Base<int> := b; assert p#tag == 5 };"},
+
+  { name := "generic_upcast_same_inst_wrong_value", outcome := .failsExactly 1,
+    why := "a WRONG inherited value read through the same-inst upcast must FAIL — the upcast is sound, not vacuous"
+    src := r"
+composite Base<T> { var tag: T }
+composite Box<T> extends Base<T> { var val: T }
+procedure u() opaque { var b: Box<int> := new Box<int>; b#tag := 1; var base: Base<int> := b; assert base#tag == 2 };"},
   -- REMAP upcast: `P2<A,B> extends Pair<B,A>` so `P2<int,bool>`'s parent is `Pair<bool,int>`
   -- (inherited `fst:bool`, `snd:int`). Reads values back through the parent — guards
   -- VALUE-PRESERVATION through the remap.
@@ -188,14 +195,14 @@ composite Base<T> { var tag: T }
 composite Box<T> extends Base<T> { var val: T }
 procedure u() opaque { var b: Box<int> := new Box<int>; var p: Base<bool> := b; assert 1 == 1 };"},
 
-  { name := "generic_upcast_remap_wrong_target", outcome := .rejected,
+  { name := "generic_upcast_remap_wrong_target", outcome := .rejected (some .UserError),
     why := "`P2<int,bool> extends Pair<B,A>` upcast to the WRONG `Pair<int,bool>` must be REJECTED — the true supertype is the remapped `Pair<bool,int>`"
     src := r"
 composite Pair<A,B> { var fst: A var snd: B }
 composite P2<A,B> extends Pair<B,A> { var extra: int }
 procedure u() opaque { var x: P2<int,bool> := new P2<int,bool>; var p: Pair<int,bool> := x; assert 1 == 1 };"},
 
-  { name := "generic_upcast_concretization_wrong_target", outcome := .rejected,
+  { name := "generic_upcast_concretization_wrong_target", outcome := .rejected (some .UserError),
     why := "`Box<bool> extends Base<int>` upcast to `Base<bool>` must be REJECTED — the supertype is the concretized `Base<int>`"
     src := r"
 composite Base<S> { var b: S }
@@ -222,6 +229,15 @@ composite L<T> extends Top<T> { }
 composite R<T> extends Top<T> { }
 composite D<T> extends L<T>, R<T> { }
 procedure u() opaque { var d: D<int> := new D<int>; var x: int := d#f; assert 1 == 1 };"},
+
+  { name := "diamond_single_parent_field", outcome := .verifies,
+    why := "positive twin: a UNIQUELY-inherited field (`lf` on the L side of a generic `D<int>`) reads back its written value — only the ambiguous diamond field is rejected, not all inheritance on a diamond shape"
+    src := r"
+composite Top<T> { var f: T }
+composite L<T> extends Top<T> { var lf: int }
+composite R<T> extends Top<T> { }
+composite D<T> extends L<T> { var df: int }
+procedure u() opaque { var d: D<int> := new D<int>; d#lf := 5; assert d#lf == 5 };"},
   -- Field-type concretization (reject-only): a `.TVar` field is checked against the holder's
   -- concrete instantiation by substituting the DECLARING composite's params (own field: holder
   -- args; inherited: via `substitutedAncestors`, remap-aware). Can never create a false accept;
@@ -272,6 +288,13 @@ composite Base<U,V> { var h: U }
 composite GHolder<A,B> extends Base<B,A> { var k: int }
 procedure u(g: GHolder<int,bool>) opaque modifies g { g#h := 7 };"},
 
+  { name := "field_tvar_inherited_remap_write_correct", outcome := .verifies,
+    why := "the positive twin: writing the REMAP-CORRECT type (`bool`) into inherited `g#h` at `GHolder<int,bool>` translates (not over-rejected)"
+    src := r"
+composite Base<U,V> { var h: U }
+composite GHolder<A,B> extends Base<B,A> { var k: int }
+procedure u(g: GHolder<int,bool>) opaque modifies g { g#h := false };"},
+
   { name := "concrete_extends_geninst_upcast", outcome := .verifies,
     why := "`IntBox extends Box<int>`: upcast to `Box<int>` + read the inherited field `val` through it verifies"
     src := r"
@@ -294,14 +317,14 @@ composite IntBox extends Box<int> { var w: int }
 composite Super extends IntBox { var z: int }
 procedure u() opaque { var s: Super := new Super; s#val := 9; var b: Box<int> := s; assert b#val == 9 };"},
 
-  { name := "concrete_extends_geninst_wrong_target", outcome := .rejected,
+  { name := "concrete_extends_geninst_wrong_target", outcome := .rejected (some .UserError),
     why := "`IntBox extends Box<int>` upcast to the WRONG instantiation `Box<bool>` must be REJECTED — the subtype check compares the SUBSTITUTED ancestor `Box<int>` with invariant args, so `Box<bool>` fails"
     src := r"
 composite Box<T> { var val: T }
 composite IntBox extends Box<int> { var w: int }
 procedure u() opaque { var ib: IntBox := new IntBox; var b: Box<bool> := ib; assert 1 == 1 };"},
 
-  { name := "concrete_extends_geninst_remap_swap", outcome := .rejected,
+  { name := "concrete_extends_geninst_remap_swap", outcome := .rejected (some .UserError),
     why := "`W extends Pair<int,bool>` upcast to the SWAPPED `Pair<bool,int>` must be REJECTED — substituted ancestor `Pair<int,bool>` ≠ `Pair<bool,int>`"
     src := r"
 composite Pair<A,B> { var a: A var b: B }
@@ -374,6 +397,14 @@ procedure u() opaque { assert 1 == 1 };"},
 composite Parent { var x: int }
 composite Child extends Parent { var y: int }
 procedure d(p: Parent) returns (r: int) opaque ensures (p is Child) ==> (r == (p as Child)#y + 1) { if (p is Child) then { var c: Child := p as Child; r := c#y } else { r := 0 } };
+procedure u() opaque { assert 1 == 1 };"},
+
+  { name := "as_guarded_downcast_generic_inst", outcome := .verifies,
+    why := "the generics × as-cast intersection: a guarded downcast to a GENERIC instantiation (`base is Box<int>` then `base as Box<int>`) writes + reads the child field, verifies"
+    src := r"
+composite Base<T> { var tag: T }
+composite Box<T> extends Base<T> { var val: T }
+procedure d(base: Base<int>) opaque modifies base { if (base is Box<int>) then { var b: Box<int> := base as Box<int>; b#val := 9; assert b#val == 9 } else { } };
 procedure u() opaque { assert 1 == 1 };"},
 ]
 
