@@ -19,10 +19,7 @@ meta import all StrataTest.Util.LaurelCorpusHarness
 
 The feature corpus for dynamic method dispatch and the behavioral-subtyping
 (Liskov) check that makes it sound. Driven by the shared `Case`/`checkCase`
-harness (`StrataTest.Util.LaurelCorpusHarness`), with must-fail twins pinning soundness. Split
-out of `PolymorphismCorpusTest` so the dispatch feature (a distinct capability:
-runtime-tag dispatchers + override-refinement checking) carries its own tests, in
-its own file, matching the repo's one-feature-per-test-file convention.
+harness (`StrataTest.Util.LaurelCorpusHarness`), with must-fail twins pinning soundness.
 -/
 
 meta section
@@ -46,8 +43,6 @@ params and monomorphize per instantiation; see `generic_dispatch_*` below).
 -/
 
 def dynamicDispatchCorpus : List Case := [
-  -- Virtual dispatch: a Parent-typed var holding a `new Child` runs Child.m (r==2),
-  -- recovered through the static Parent reference via the dispatcher's tag-conditioned post.
   { name := "dispatch_parent_holds_child", outcome := .verifies,
     why := "`b: Parent := new Child; b#m()` runs Child's override (r==2) — dynamic dispatch through a static Parent reference"
     src := r"
@@ -69,8 +64,6 @@ composite Child extends Parent {
   procedure m(self: Child) returns (r: int) opaque ensures r == 2 { r := 2 };
 }
 procedure u() opaque { var b: Parent := new Child; var r: int := b#m(); assert r == 1 };"},
-  -- Modular dynamic dispatch: a helper assuming the Parent contract is sound for any subtype
-  -- BECAUSE the Liskov check guarantees the override refines it.
   { name := "dispatch_modular_sound", outcome := .verifies,
     why := "`helper(b: Parent) ensures out>=0 { out := b#m() }` called with a Child verifies — the override (r==2) refines Parent's (r>=0), so the modular guarantee holds under dynamic dispatch"
     src := r"
@@ -82,8 +75,6 @@ composite Child extends Parent {
 }
 procedure helper(b: Parent) returns (out: int) opaque ensures out >= 0 { out := b#m() };
 procedure u() opaque { var c: Child := new Child; var got: int := helper(c); assert got >= 0 };"},
-  -- Three-level, properly refining (GP: r>=0, P: r>=1, C: r>=2): a GP-typed var holding a C
-  -- dispatches through all levels; GP's weak contract holds.
   { name := "dispatch_three_level", outcome := .verifies,
     why := "3-level refining hierarchy (r>=0 ⊇ r>=1 ⊇ r>=2): GP-typed holding a C dispatches soundly, GP's contract r>=0 holds"
     src := r"
@@ -97,7 +88,6 @@ composite C extends P {
   procedure m(self: C) returns (r: int) opaque ensures r >= 2 { r := 5 };
 }
 procedure u() opaque { var x: GP := new C; var r: int := x#m(); assert r >= 0 };"},
-  -- LISKOV ENFORCEMENT: a weaker-postcondition override (Parent r>=0, Child r==-5) is REJECTED.
   { name := "liskov_weaker_post_rejected", outcome := .failsExactly 1,
     why := "Child.m `ensures r == -5` does NOT refine Parent.m `ensures r >= 0` — the override-refinement (Liskov) check FAILS"
     src := r"
@@ -108,7 +98,6 @@ composite Child extends Parent {
   procedure m(self: Child) returns (r: int) opaque ensures r == -5 { r := -5 };
 }
 procedure u() opaque { assert 1 == 1 };"},
-  -- LISKOV ENFORCEMENT: a stronger-precondition override (Parent a>=0, Child a>=5) is REJECTED.
   { name := "liskov_stronger_pre_rejected", outcome := .failsExactly 2,
     why := "Child.m `requires a >= 5` is STRONGER than Parent.m `requires a >= 0` — contravariance FAILS (the pre-refinement checker fails; a 2nd VC from the dispatcher path also surfaces — both reject)"
     src := r"
@@ -119,7 +108,6 @@ composite Child extends Parent {
   procedure m(self: Child, a: int) returns (r: int) requires a >= 5 opaque ensures true { r := 1 };
 }
 procedure u() opaque { assert 1 == 1 };"},
-  -- SOUND override: Child.m refines Parent.m (r==2 ⟹ r>=0, weaker pre) — accepted.
   { name := "liskov_sound_override", outcome := .verifies,
     why := "Child.m `ensures r == 2` refines Parent.m `ensures r >= 0` (2>=0) — the override-refinement check passes"
     src := r"
@@ -154,7 +142,6 @@ composite Child extends Parent {
   procedure m(self: Child, a: int) returns (r: int) requires a >= 0 opaque ensures r == a - 100 { r := a - 100 };
 }
 procedure u() opaque { assert 1 == 1 };"},
-  -- SOUNDNESS of multi-level dispatch: a clearly-false assertion must never verify.
   { name := "dispatch_three_level_false", outcome := .failsExactly 1,
     why := "a false assertion (r>=100) on a dynamically-dispatched 3-level call must FAIL — dispatch is sound, not vacuous"
     src := r"
@@ -355,11 +342,6 @@ composite SBox<T> extends Box<T> {
   procedure m(self: SBox<T>, c: Cell) opaque ensures c#v == old(c#v) - 1 modifies c { c#v := c#v - 1 };
 }
 procedure u() opaque { var b: Box<int> := new SBox<int>; assert 1 == 1 };"},
-  -- SHAPE COVERAGE (added after a coverage audit; each behavior was confirmed working by
-  -- execution but had no pin). These exercise dispatcher/checker shapes the cases above did
-  -- not: a non-linear hierarchy, multi-output / multi-arg methods, a field receiver, a
-  -- transitive (in-body) call, the reverse mixed-modifies direction, a non-overridden method
-  -- coexisting with an overridden one, and a heap-reading (non-writing) family.
   -- SIBLING / non-linear hierarchy: two incomparable children both override m — equal-distance
   -- siblings, exercising the name-tiebreaker path that makes sibling dispatch order deterministic.
   -- (Branch order is irrelevant to correctness here: dispatch is by runtime tag, and a value `is`
@@ -426,7 +408,6 @@ composite Child extends Parent {
   procedure m(self: Child, a: int, b: int) returns (r: int) opaque ensures r == a + b { r := a + b };
 }
 procedure u() opaque { var o: Parent := new Child; var r: int := o#m(3, 4); assert r == 7 };"},
-  -- Dispatch through a FIELD receiver (`h#p#m()`): receiver is a heap field, not a local/param.
   { name := "dispatch_through_field", outcome := .verifies,
     why := "a composite field `h#p : Parent` holding a Child dispatches to Child.m on `h#p#m()` (r==2)"
     src := r"
@@ -466,8 +447,6 @@ composite Child extends Parent {
   procedure m(self: Child) returns (r: int) opaque ensures r == 2 { r := 2 };
 }
 procedure u() opaque { var b: Parent := new Child; var rm: int := b#m(); var rn: int := b#n(); assert rm == 2 && rn == 9 };"},
-  -- READER-ONLY family: the overridden method READS a heap field but does not write — a heap
-  -- status distinct from the writer/neutral cases above.
   { name := "dispatch_reader_only", outcome := .verifies,
     why := "an overridden method that reads `self#x` into a local but writes nothing dispatches + verifies (heap-reader, not writer)"
     src := r"
@@ -478,8 +457,7 @@ composite Child extends Parent {
   procedure m(self: Child) returns (r: int) opaque ensures r == 0 { var t: int := self#x; r := 0 };
 }
 procedure u() opaque { var c: Child := new Child; var b: Parent := c; var r: int := b#m(); assert r == 0 };"},
-  -- REVERSE mixed-modifies: parent method is a heap-WRITER, override is heap-NEUTRAL (narrows
-  -- the frame — sound). The complement of `mixed_modifies_dispatch_translates` above.
+  -- The complement of `mixed_modifies_dispatch_translates` above (writer parent, neutral override).
   { name := "dispatch_reverse_mixed_modifies", outcome := .verifies,
     why := "parent `modifies c` (writer), override empty body + no modifies (neutral, narrows the frame) — `unifyDispatchFamilyHeap` makes the family thread $heap uniformly so it translates + verifies"
     src := r"
