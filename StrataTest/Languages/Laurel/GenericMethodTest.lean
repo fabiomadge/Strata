@@ -46,10 +46,10 @@ composite Box<T> {
 
 -- Inheritance monomorphizes the child + parent (concrete or generic parent), topo-
 -- ordering the parent monomorph first. Upcast subtyping is REMAP-AWARE via
--- `substitutedAncestors` (an earlier non-substituting version accepted the WRONG supertype
--- — UNSOUND; these pin both the correct upcasts AND that the wrong targets are rejected).
--- Field-type concretization is reject-only: a `.TVar` field is checked against the holder's
--- concrete instantiation, so a wrong access rejects while correct/polymorphic ones translate.
+-- `substitutedAncestors` (compares against the substituted ancestor, so these pin both the
+-- correct upcasts AND that the wrong targets are rejected). Field-type concretization is
+-- reject-only: a `.TVar` field is checked against the holder's concrete instantiation, so a
+-- wrong access rejects while correct/polymorphic ones translate.
 def genericMethodCorpus : List Case := [
   { name := "generic_method_get", outcome := .verifies,
     why := "`Box<T>.get` reading `self#val` at int verifies (method lift + monomorphization)"
@@ -106,8 +106,8 @@ composite Box<T> {
 }
 procedure u() opaque { var b: Box<int> := new Box<int>; var p: int := b#id2(7); var q: bool := b#id2(false); assert p == 7 && q == false };"},
   -- Inheritance — concrete parent (`Box<T> extends Base`): child monomorphizes to
-  -- `Box$int extends Base`, emitted AFTER the parent so re-resolution builds the parent's
-  -- field-inheritance scope first, so the parent monomorph must be emitted before the child.
+  -- `Box$int extends Base`, emitted AFTER the parent so re-resolution can build the child's
+  -- field-inheritance scope from the parent's (which must already be in place).
   { name := "generic_extends_concrete_parent", outcome := .verifies,
     why := "`Box<T> extends Base` (concrete parent) monomorphizes + inherits `tag`, verifies"
     src := r"
@@ -378,11 +378,10 @@ composite Child extends Parent { var y: int }
 procedure d(p: Parent) returns (r: int) opaque ensures true { var c: Child := p as Child; r := c#y };
 procedure u() opaque { var got: int := d(new Parent); assert 1 == 1 };"},
 
-  -- `as` cast in a CONTRACT position. `as` lowers to a call to the synthesized
-  -- `downcast$T` helper (a pure preconditioned function), so `(p as Child)#y` can appear
-  -- in a postcondition — the old assert-block lowering was statement-shaped and illegal
-  -- in a formula. PrecondElim discharges `downcast$Child`'s `is Child` precondition as a
-  -- well-definedness obligation, guarded here by the `p is Child` antecedent so it holds.
+  -- `as` cast in a CONTRACT position. `as` lowers to a call to the synthesized `downcast$T`
+  -- helper (a pure preconditioned function), so `(p as Child)#y` can appear in a formula
+  -- (a statement-shaped lowering cannot). PrecondElim discharges `downcast$Child`'s `is Child`
+  -- precondition as a well-definedness obligation, guarded here by the `p is Child` antecedent.
   { name := "as_in_contract_postcondition", outcome := .verifies,
     why := "`(p as Child)#y` in a postcondition translates + verifies (downcast$T helper + PrecondElim WD obligation, guarded by `p is Child`)"
     src := r"
