@@ -138,8 +138,7 @@ def isOverriddenMethod (model : SemanticModel) (program : Program)
     Generic inheriting families ARE supported: the dispatcher's `is`/`as` tag-tests use
     the applied form (`appliedTagType`, so `self is SBox<T>` not bare `SBox`), and the
     Liskov checker carries the composite's type params so it monomorphizes per
-    instantiation. (An earlier `familyIsGeneric` clause gated generics off; both gaps
-    are now fixed, so any overridden method — generic or not — is virtual + checked.) -/
+    instantiation. So any overridden method — generic or not — is virtual + checked. -/
 def isVirtualDispatchMethod (model : SemanticModel) (program : Program)
     (declarerName : Identifier) (mname : String) : Bool :=
   isOverriddenMethod model program declarerName mname
