@@ -36,8 +36,7 @@ get(self: Box<T>) returns (r: T) … }` — is lifted (by `liftInstanceProcedure
 moved before monomorphization) to a top-level POLY procedure carrying the composite's
 type params (`Box$get<T>(self: Box<T>)`), which the procedure monomorphizer then
 clones per call-site instantiation. So methods reuse the procedure-monomorphization
-machinery with no new monomorphization. `extends` on a generic composite is still
-rejected loud. -/
+machinery with no new monomorphization. -/
 private def boxGet := r"
 composite Box<T> {
   var val: T
@@ -108,7 +107,7 @@ composite Box<T> {
 procedure u() opaque { var b: Box<int> := new Box<int>; var p: int := b#id2(7); var q: bool := b#id2(false); assert p == 7 && q == false };"},
   -- Inheritance — concrete parent (`Box<T> extends Base`): child monomorphizes to
   -- `Box$int extends Base`, emitted AFTER the parent so re-resolution builds the parent's
-  -- field-inheritance scope first (the parent-before-child emission-order fix).
+  -- field-inheritance scope first, so the parent monomorph must be emitted before the child.
   { name := "generic_extends_concrete_parent", outcome := .verifies,
     why := "`Box<T> extends Base` (concrete parent) monomorphizes + inherits `tag`, verifies"
     src := r"
@@ -117,7 +116,7 @@ composite Box<T> extends Base { var val: T }
 procedure u() opaque { var b: Box<int> := new Box<int>; b#tag := 1; b#val := 7; assert b#tag == 1 && b#val == 7 };"},
 
   { name := "generic_extends_concrete_parent_wrong", outcome := .failsExactly 1,
-    why := "a wrong INHERITED-field value must FAIL — checked, not vacuously havoc'd (the bug fixed here)"
+    why := "a wrong INHERITED-field value must FAIL — the inherited field is genuinely checked, not havoc'd"
     src := r"
 composite Base { var tag: int }
 composite Box<T> extends Base { var val: T }
@@ -153,7 +152,7 @@ composite Box<T> extends Base<T> { var val: T }
 procedure u() opaque { var b: Box<int> := new Box<int>; b#tag := 5; var p: Base<int> := b; assert p#tag == 5 };"},
   -- REMAP upcast: `P2<A,B> extends Pair<B,A>` so `P2<int,bool>`'s parent is `Pair<bool,int>`
   -- (inherited `fst:bool`, `snd:int`). Reads values back through the parent — guards
-  -- VALUE-PRESERVATION through the remap, the exact property the reverted unsound upcast broke.
+  -- VALUE-PRESERVATION through the remap.
   { name := "generic_upcast_remap", outcome := .verifies,
     why := "`P2<int,bool>` → `Pair<bool,int>` verifies with values preserved through the remap"
     src := r"
@@ -181,7 +180,7 @@ procedure u() opaque { var x: Box<bool> := new Box<bool>; x#b := 7; var p: Base<
 composite Base<S> { var b: S }
 composite Box<T> extends Base<int> { var v: T }
 procedure u() opaque { var x: Box<bool> := new Box<bool>; x#b := 7; var p: Base<int> := x; assert p#b == 6 };"},
-  -- Upcast MUST-REJECTs — the unsoundnesses the adversarial pass found, now closed.
+  -- Upcast MUST-REJECTs.
   { name := "generic_upcast_wrong_inst", outcome := .rejected,
     why := "`Box<int>` into a `Base<bool>` var must be REJECTED (wrong instantiation)"
     src := r"
@@ -190,14 +189,14 @@ composite Box<T> extends Base<T> { var val: T }
 procedure u() opaque { var b: Box<int> := new Box<int>; var p: Base<bool> := b; assert 1 == 1 };"},
 
   { name := "generic_upcast_remap_wrong_target", outcome := .rejected,
-    why := "`P2<int,bool> extends Pair<B,A>` upcast to the WRONG `Pair<int,bool>` (true supertype `Pair<bool,int>`) must be REJECTED — the unsound wrong-accept that ignored the extends remap"
+    why := "`P2<int,bool> extends Pair<B,A>` upcast to the WRONG `Pair<int,bool>` must be REJECTED — the true supertype is the remapped `Pair<bool,int>`"
     src := r"
 composite Pair<A,B> { var fst: A var snd: B }
 composite P2<A,B> extends Pair<B,A> { var extra: int }
 procedure u() opaque { var x: P2<int,bool> := new P2<int,bool>; var p: Pair<int,bool> := x; assert 1 == 1 };"},
 
   { name := "generic_upcast_concretization_wrong_target", outcome := .rejected,
-    why := "`Box<bool> extends Base<int>` upcast to `Base<bool>` must be REJECTED (supertype is `Base<int>`) — the other concretization wrong-accept"
+    why := "`Box<bool> extends Base<int>` upcast to `Base<bool>` must be REJECTED — the supertype is the concretized `Base<int>`"
     src := r"
 composite Base<S> { var b: S }
 composite Box<T> extends Base<int> { var v: T }
@@ -215,8 +214,8 @@ procedure u() opaque { var b: Box<int> := new Box<int>; var p: Other<int> := b; 
   -- The receiver is `D<int>` (an `.Applied` type), so the diamond check must peel the base
   -- name — else the access is missed pre-monomorphization and surfaces as an internal error
   -- when the monomorph re-resolves.
-  { name := "diamond_field_generic_receiver", outcome := .rejected,
-    why := "a diamond-inherited field read on a generic receiver `D<int>` must be REJECTED cleanly (peel `.Applied` to base name), not an internal error"
+  { name := "diamond_field_generic_receiver", outcome := .rejected (some .UserError),
+    why := "a diamond-inherited field read on a generic receiver `D<int>` must be REJECTED cleanly (peel `.Applied` to base name) — a `.UserError`, not an internal error"
     src := r"
 composite Top<T> { var f: T }
 composite L<T> extends Top<T> { }
@@ -296,14 +295,14 @@ composite Super extends IntBox { var z: int }
 procedure u() opaque { var s: Super := new Super; s#val := 9; var b: Box<int> := s; assert b#val == 9 };"},
 
   { name := "concrete_extends_geninst_wrong_target", outcome := .rejected,
-    why := "`IntBox extends Box<int>` upcast to the WRONG instantiation `Box<bool>` must be REJECTED — the new subtype arm compares the SUBSTITUTED ancestor `Box<int>` with invariant args, so `Box<bool>` fails"
+    why := "`IntBox extends Box<int>` upcast to the WRONG instantiation `Box<bool>` must be REJECTED — the subtype check compares the SUBSTITUTED ancestor `Box<int>` with invariant args, so `Box<bool>` fails"
     src := r"
 composite Box<T> { var val: T }
 composite IntBox extends Box<int> { var w: int }
 procedure u() opaque { var ib: IntBox := new IntBox; var b: Box<bool> := ib; assert 1 == 1 };"},
 
   { name := "concrete_extends_geninst_remap_swap", outcome := .rejected,
-    why := "`W extends Pair<int,bool>` upcast to the SWAPPED `Pair<bool,int>` must be REJECTED (the prior-bug shape) — substituted ancestor `Pair<int,bool>` ≠ `Pair<bool,int>`"
+    why := "`W extends Pair<int,bool>` upcast to the SWAPPED `Pair<bool,int>` must be REJECTED — substituted ancestor `Pair<int,bool>` ≠ `Pair<bool,int>`"
     src := r"
 composite Pair<A,B> { var a: A var b: B }
 composite W extends Pair<int,bool> { var w: int }
@@ -317,7 +316,7 @@ composite IntBox extends Box<int> { var w: int }
 procedure u() opaque { var ib: IntBox := new IntBox; ib#val := 5; var b: Box<int> := ib; var got: int := b#val; assert got == 6 };"},
 
   { name := "as_guarded_downcast_heap_neutral", outcome := .verifies,
-    why := "`if (p is Child) then ... p as Child ...` in a heap-neutral opaque proc on an opaque `Parent` param translates + verifies (was NotYetImplemented before the heap-neutral AsType-lowering fix); the guard discharges the cast's is-obligation. The cast VALUE is not asserted here on purpose — `p` is opaque and the proc is heap-neutral, so `c#y` is unconstrained (asserting a concrete value would be genuinely unprovable); the is-obligation is pinned by the `_guard_fails` twin and the cast VALUE by `as_guarded_downcast_value_observed`."
+    why := "a guarded `p as Child` in a heap-neutral opaque proc translates + verifies; the `p is Child` guard discharges the cast's is-obligation. The cast value is deliberately not asserted — `p` is opaque and the proc heap-neutral, so `c#y` is unconstrained (a concrete-value assert would be unprovable)."
     src := r"
 composite Parent { var x: int }
 composite Child extends Parent { var y: int }
@@ -362,7 +361,7 @@ procedure u() opaque { var got: int := d(new Parent); assert 1 == 1 };"},
   -- in a formula. PrecondElim discharges `downcast$Child`'s `is Child` precondition as a
   -- well-definedness obligation, guarded here by the `p is Child` antecedent so it holds.
   { name := "as_in_contract_postcondition", outcome := .verifies,
-    why := "`(p as Child)#y` in a postcondition translates + verifies (downcast$T helper + PrecondElim WD obligation, guarded by `p is Child`); previously NotYetImplemented"
+    why := "`(p as Child)#y` in a postcondition translates + verifies (downcast$T helper + PrecondElim WD obligation, guarded by `p is Child`)"
     src := r"
 composite Parent { var x: int }
 composite Child extends Parent { var y: int }
