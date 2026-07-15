@@ -361,11 +361,12 @@ procedure u() opaque { var b: Box<int> := new SBox<int>; assert 1 == 1 };"},
   -- not: a non-linear hierarchy, multi-output / multi-arg methods, a field receiver, a
   -- transitive (in-body) call, the reverse mixed-modifies direction, a non-overridden method
   -- coexisting with an overridden one, and a heap-reading (non-writing) family.
-  -- SIBLING / non-linear hierarchy: two incomparable children both override m — the only
-  -- shape where the dispatcher's most-derived-first `qsort` ordering is load-bearing. A
-  -- Parent-typed var holding Child2 must run Child2.m.
+  -- SIBLING / non-linear hierarchy: two incomparable children both override m — equal-distance
+  -- siblings, exercising the name-tiebreaker path that makes sibling dispatch order deterministic.
+  -- (Branch order is irrelevant to correctness here: dispatch is by runtime tag, and a value `is`
+  -- exactly one sibling's type.) A Parent-typed var holding Child2 must run Child2.m.
   { name := "dispatch_sibling_holds_child2", outcome := .verifies,
-    why := "Parent with two incomparable overriders C1/C2; a Parent-typed var holding a C2 dispatches to C2.m (r==3) — exercises sibling dispatch (qsort ordering among equal-distance overriders)"
+    why := "Parent with two incomparable overriders C1/C2; a Parent-typed var holding a C2 dispatches to C2.m (r==3) by runtime tag — exercises equal-distance-sibling dispatch"
     src := r"
 composite Parent { var x: int
   procedure m(self: Parent) returns (r: int) opaque ensures r >= 0 { r := 1 };
