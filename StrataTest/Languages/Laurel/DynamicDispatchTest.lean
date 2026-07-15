@@ -198,9 +198,9 @@ composite Child extends Parent {
 }
 procedure u() opaque { assert 1 == 1 };"},
   -- GENERIC dynamic dispatch: a method on a GENERIC composite, overridden by a generic
-  -- subtype, now dispatches virtually (was gated to static before). The dispatcher's
-  -- is/as tag-tests use the applied form (`self is SBox<int>`) and the Liskov checker
-  -- carries the composite's type params so it monomorphizes per instantiation.
+  -- subtype, dispatches virtually. The dispatcher's is/as tag-tests use the applied
+  -- form (`self is SBox<int>`) and the Liskov checker carries the composite's type
+  -- params so it monomorphizes per instantiation.
   { name := "generic_dispatch_runtime_override", outcome := .verifies,
     why := "`b: Box<int> := new SBox<int>; b#get()` runs SBox's override (r==7) through a generic Box<int> reference — dynamic dispatch over a generic family"
     src := r"
@@ -244,13 +244,13 @@ composite SBox<T> extends Box<T> {
   procedure get(self: SBox<T>) returns (r: int) opaque ensures r == 7 { r := 7 };
 }
 procedure u() opaque { var bi: Box<int> := new SBox<int>; var ri: int := bi#get(); var bb: Box<bool> := new SBox<bool>; var rb: int := bb#get(); assert ri == 7 && rb == 7 };"},
-  -- VOID heap-MUTATING method, dispatched. A void method that is BOTH overridden AND a
-  -- heap-writer (`modifies`) previously failed to translate: the dispatcher's `then`
-  -- branch is a block while the bare `else` fallthrough synthesized a different type for
-  -- the `$heap`-threaded void call, giving a spurious "'if' branches have incompatible
-  -- types 'Heap' and 'void'". The fallthrough is now block-wrapped (symmetric with `then`).
+  -- VOID heap-MUTATING method, dispatched. For a void method that is BOTH overridden AND a
+  -- heap-writer (`modifies`), the dispatcher's `then` branch is a block, so the `else`
+  -- fallthrough must be block-wrapped too — otherwise the two branches synthesize
+  -- different types for the `$heap`-threaded void call ("'if' branches have incompatible
+  -- types 'Heap' and 'void'"). Block-wrapping the fallthrough keeps the branches symmetric.
   { name := "void_heapwriter_dispatch_translates", outcome := .verifies,
-    why := "a void heap-mutating method that is overridden + dispatched translates + verifies (was a translation failure; the dispatcher fallthrough is now block-wrapped for branch-type symmetry)"
+    why := "a void heap-mutating method that is overridden + dispatched translates + verifies (dispatcher fallthrough block-wrapped for branch-type symmetry)"
     src := r"
 composite Cell { var v: int }
 composite Parent { var x: int
@@ -302,15 +302,14 @@ composite Child extends Parent {
   procedure m(self: Child, c: Cell) opaque ensures c#v == 1 modifies c { c#v := 1 };
 }
 procedure u() opaque { var b: Parent := new Child; var cc: Cell := new Cell; b#m(cc); assert 1 == 1 };"},
-  -- TWO-STATE (`old(...)`) Liskov refinement. The post-checker was previously emitted
-  -- heap-NEUTRAL, so `old(c#v)` collapsed to the current heap and ANY two-state override
-  -- contract was checked VACUOUSLY — a violation slipped through at definition time. The
-  -- post-checker is now two-state-faithful (calls a heap-writer `$childspec` companion so
-  -- it gains an inout `$heap`; `old()` survives `PushOldInward`). These pin that a violating
-  -- two-state override is now REJECTED and a sound one still VERIFIES. (Definition-only —
-  -- `u` just asserts 1==1 — so the outcome is the static checker's, in isolation.)
+  -- TWO-STATE (`old(...)`) Liskov refinement. The post-checker is two-state-faithful: it
+  -- calls a heap-writer `$childspec` companion so it gains an inout `$heap` and `old()`
+  -- survives `PushOldInward`. Without that, `old(c#v)` would collapse to the current heap
+  -- and any two-state override contract would be checked VACUOUSLY. These pin that a
+  -- violating two-state override is REJECTED and a sound one still VERIFIES. (Definition-only
+  -- — `u` just asserts 1==1 — so the outcome is the static checker's, in isolation.)
   { name := "old_liskov_weaker_post_rejected", outcome := .failsExactly 1,
-    why := "Child.m `ensures c#v == old(c#v) - 1` (decrements) does NOT refine Parent.m `ensures c#v >= old(c#v)` (non-decreasing) — the two-state post-checker now rejects it (was vacuously accepted when the checker was heap-neutral)"
+    why := "Child.m `ensures c#v == old(c#v) - 1` (decrements) does NOT refine Parent.m `ensures c#v >= old(c#v)` (non-decreasing) — the two-state post-checker rejects it"
     src := r"
 composite Cell { var v: int }
 composite Parent { var x: int
