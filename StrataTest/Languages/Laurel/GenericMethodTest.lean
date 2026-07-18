@@ -255,6 +255,27 @@ composite D<T> extends Mid<T> {
 }
 procedure u() opaque { var d: D<int> := new D<int>; assert 1 == 1 };"},
 
+  -- Diamond access inside a QUANTIFIER body: the diamond check traverses ALL
+  -- sub-expressions (via `mapStmtExprM`), so an ambiguous read in a `forall` is caught
+  -- as a clean `.UserError`, not silently accepted (the coverage gap that motivated the
+  -- total-traversal rewrite; the same class of skipped positions covers `old`/`as`/`is`).
+  { name := "diamond_field_in_quantifier", outcome := .rejected (some .UserError),
+    why := "a diamond-inherited field read inside a `forall` must be REJECTED — the diamond check covers quantifier bodies, not just statement positions"
+    src := r"
+composite Top { var f: int }
+composite L extends Top { }
+composite R extends Top { }
+composite D extends L, R { }
+procedure u(d: D) opaque { assume forall(i: int) => d#f >= 0; assert 1 == 1 };"},
+
+  { name := "unique_field_in_quantifier", outcome := .verifies,
+    why := "positive twin: a UNIQUELY-inherited field read inside a `forall` must verify — the total traversal must not over-reject"
+    src := r"
+composite Top { var f: int }
+composite Mid extends Top { }
+composite D extends Mid { }
+procedure u(d: D) opaque { assume forall(i: int) => d#f >= 0; assert 1 == 1 };"},
+
   { name := "diamond_single_parent_field", outcome := .verifies,
     why := "positive twin: a UNIQUELY-inherited field (`lf` on the L side of a generic `D<int>`) reads back its written value — only the ambiguous diamond field is rejected, not all inheritance on a diamond shape"
     src := r"
