@@ -230,6 +230,31 @@ composite R<T> extends Top<T> { }
 composite D<T> extends L<T>, R<T> { }
 procedure u() opaque { var d: D<int> := new D<int>; var x: int := d#f; assert 1 == 1 };"},
 
+  -- Same diamond-inherited field access, but INSIDE an instance method (`self#f`).
+  -- `validateDiamondFieldAccesses` must walk instance-method bodies, not only lifted
+  -- `staticProcedures` — else the access is missed at the initial resolve and only surfaces
+  -- post-lift as a `.StrataBug` from the re-resolution net instead of this clean `.UserError`.
+  { name := "diamond_field_in_method", outcome := .rejected (some .UserError),
+    why := "a diamond-inherited field read inside an instance method must be REJECTED as a `.UserError` (the diamond check walks instance methods, not just lifted static procs)"
+    src := r"
+composite Top<T> { var f: T }
+composite L<T> extends Top<T> { }
+composite R<T> extends Top<T> { }
+composite D<T> extends L<T>, R<T> {
+  procedure getF(self: D<T>) returns (r: T) opaque ensures 1 == 1 { r := self#f };
+}
+procedure u() opaque { var d: D<int> := new D<int>; assert 1 == 1 };"},
+
+  { name := "unique_field_in_method", outcome := .verifies,
+    why := "positive twin: a UNIQUELY-inherited field read inside an instance method is NOT a diamond and must verify — the diamond-in-method check must not over-reject"
+    src := r"
+composite Top<T> { var f: T }
+composite Mid<T> extends Top<T> { }
+composite D<T> extends Mid<T> {
+  procedure getF(self: D<T>) returns (r: T) opaque ensures 1 == 1 { r := self#f };
+}
+procedure u() opaque { var d: D<int> := new D<int>; assert 1 == 1 };"},
+
   { name := "diamond_single_parent_field", outcome := .verifies,
     why := "positive twin: a UNIQUELY-inherited field (`lf` on the L side of a generic `D<int>`) reads back its written value — only the ambiguous diamond field is rejected, not all inheritance on a diamond shape"
     src := r"
