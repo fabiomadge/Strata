@@ -276,6 +276,38 @@ composite Mid extends Top { }
 composite D extends Mid { }
 procedure u(d: D) opaque { assume forall(i: int) => d#f >= 0; assert 1 == 1 };"},
 
+  -- Diamond access in a PRECONDITION: the check drives over every procedure position
+  -- (via `mapProcedureM`), not just the body, so an ambiguous read in a `requires`
+  -- clause is rejected as a clean `.UserError` (it was silently accepted when the driver
+  -- walked only `proc.body`; `invokeOn`/axioms are covered the same way).
+  { name := "diamond_field_in_precondition", outcome := .rejected (some .UserError),
+    why := "a diamond-inherited field read in a `requires` precondition must be REJECTED — the diamond check covers all procedure positions, not just the body"
+    src := r"
+composite Top { var f: int }
+composite L extends Top { }
+composite R extends Top { }
+composite D extends L, R { }
+procedure u(d: D) requires d#f >= 0 opaque ensures 1 == 1 { };"},
+
+  { name := "unique_field_in_precondition", outcome := .verifies,
+    why := "positive twin: a UNIQUELY-inherited field read in a `requires` precondition must verify — widening the driver to preconditions must not over-reject"
+    src := r"
+composite Top { var f: int }
+composite Mid extends Top { }
+composite D extends Mid { }
+procedure u(d: D) requires d#f >= 0 opaque ensures 1 == 1 { };"},
+
+  { name := "diamond_field_in_method_precondition", outcome := .rejected (some .UserError),
+    why := "a diamond-inherited field read in an INSTANCE-method precondition must be REJECTED — the driver walks instance methods' every position, not only lifted static procs' bodies"
+    src := r"
+composite Top { var f: int }
+composite L extends Top { }
+composite R extends Top { }
+composite E extends L, R {
+  procedure m(self: E) returns (r: int) requires self#f >= 0 opaque ensures 1 == 1 { r := 0 };
+}
+procedure caller(e: E) opaque { assert 1 == 1 };"},
+
   { name := "diamond_single_parent_field", outcome := .verifies,
     why := "positive twin: a UNIQUELY-inherited field (`lf` on the L side of a generic `D<int>`) reads back its written value — only the ambiguous diamond field is rejected, not all inheritance on a diamond shape"
     src := r"
