@@ -483,6 +483,21 @@ composite Base<T> { var tag: T }
 composite Box<T> extends Base<T> { var val: T }
 procedure d(base: Base<int>) opaque modifies base { if (base is Box<int>) then { var b: Box<int> := base as Box<int>; b#val := 9; assert b#val == 9 } else { } };
 procedure u() opaque { assert 1 == 1 };"},
+
+  -- SOUNDNESS: `#`-call on a NON-COMPOSITE receiver must be REJECTED, not silently bound to a
+  -- same-named top-level static procedure. Was a silent unsound accept: `z#sideEffect(-1)`
+  -- resolved to the global `sideEffect` but LiftInstanceProcedures/ContractPass only inject the
+  -- precondition for a genuine instance call, so `requires x>0` was dropped and it verified clean.
+  -- Now rejected at resolution (receiver `int` has no methods).
+  { name := "instance_call_on_noncomposite_rejected", outcome := .rejected (some .UserError),
+    why := "`z#sideEffect(-1)` where `z: int` and `sideEffect` is a top-level static proc must be REJECTED — a `#` call needs a composite receiver; else the callee's precondition is silently dropped (unsound)"
+    src := r"
+procedure sideEffect(x: int) requires x > 0 opaque ensures 1 == 1 { };
+procedure caller() opaque { var z: int := 5; z#sideEffect(-1); assert 1 == 1 };"},
+
+  { name := "instance_call_on_composite_still_works", outcome := .verifies,
+    why := "positive twin: a genuine `bx#get()` on a composite receiver still resolves + verifies (the non-composite rejection must not break real instance calls)"
+    src := boxGet ++ "procedure u() opaque { var bx: Box<int> := new Box<int>; bx#val := 7; var got: int := bx#get(); assert got == 7 };"},
 ]
 
 def runGenericMethodTest : IO Unit := checkCases genericMethodCorpus
