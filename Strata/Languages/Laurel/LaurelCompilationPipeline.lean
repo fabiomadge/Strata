@@ -25,6 +25,7 @@ import Strata.Languages.Laurel.ConstrainedTypeElim
 import Strata.Languages.Laurel.ContractPass
 import Strata.Languages.Laurel.PushOldInward
 import Strata.Languages.Laurel.LiftInstanceProcedures
+import Strata.Languages.Laurel.CheckOverrideRefinement
 import Strata.Languages.Laurel.TypeAliasElim
 import Strata.Languages.Laurel.MonomorphizeComposites
 public import Strata.Languages.Laurel.LaurelPass
@@ -99,6 +100,12 @@ abbrev TranslateResultWithLaurel := (Option Core.Program) × (List DiagnosticMod
 
 /-- The ordered sequence of Laurel-to-Laurel lowering passes. -/
 def laurelPipeline : Array LoweringPass := #[
+  -- Behavioral-subtyping (Liskov) check for method overrides. Runs FIRST, while
+  -- methods are still attached to their composites and the `extending` chain is
+  -- intact (LiftInstanceProcedures, next, flattens them to top-level procs and
+  -- clears the override relation). Purely additive (appends checker procedures),
+  -- and the soundness prerequisite for dynamic dispatch.
+  checkOverrideRefinementPass,
   -- Polymorphism: lift instance procedures, then monomorphize, BEFORE everything else
   -- (the lift must precede monomorphization, and both must precede heap parameterization).
   liftInstanceProceduresPass,
@@ -114,9 +121,9 @@ def laurelPipeline : Array LoweringPass := #[
   constrainedTypeElimPass,
   filterNonCompositeModifiesPass,
   mergeAndLiftReturnsPass,
-  -- `liftInstanceProceduresPass` runs at position 0 (it must precede monomorphization);
-  -- that also places it before `eliminateValueInReturnsPass`, as value-returning
-  -- instance methods require, so no entry is needed here.
+  -- `liftInstanceProceduresPass` runs near the front (before monomorphization); that
+  -- also places it before `eliminateValueInReturnsPass`, as value-returning instance
+  -- methods require, so no entry is needed here.
   eliminateValueInReturnsPass,
   heapParameterizationPass,
   typeHierarchyTransformPass,

@@ -147,6 +147,128 @@ def mapStmtExprM [Monad m] (f : StmtExprMd → m StmtExprMd) (expr : StmtExprMd)
 def mapStmtExpr (f : StmtExprMd → StmtExprMd) (expr : StmtExprMd) : StmtExprMd :=
   (mapStmtExprM (m := Id) f expr)
 
+/-! ### Small boolean-combinator builders + contract param-alignment
+
+Shared by the passes that synthesize obligation expressions (e.g. the Liskov
+refinement checker and the dynamic-dispatch dispatcher), which otherwise hand-roll
+the same `.PrimitiveOp .And/.Implies/.Not` nodes and the same param-renaming map. -/
+
+/-- `a && b` as a `StmtExprMd`. -/
+def andMd (src : Option FileRange) (a b : StmtExprMd) : StmtExprMd :=
+  ⟨ .PrimitiveOp .And [a, b], src ⟩
+
+/-- `a ==> b` as a `StmtExprMd`. -/
+def impliesMd (src : Option FileRange) (a b : StmtExprMd) : StmtExprMd :=
+  ⟨ .PrimitiveOp .Implies [a, b], src ⟩
+
+/-- `!a` as a `StmtExprMd`. -/
+def notMd (src : Option FileRange) (a : StmtExprMd) : StmtExprMd :=
+  ⟨ .PrimitiveOp .Not [a], src ⟩
+
+/-- Conjoin a list of boolean `StmtExprMd`s, `true` if empty. Seeds the fold with
+    the literal `true` (the `.And` identity), so `[p]` is `true && p` and `[]` is
+    `true` — SMT-equivalent to a leading-element fold, used where callers want a
+    uniform shape. (Callers that need free-filtering or to drop the leading `true`
+    should pre-process / seed themselves.) -/
+def conjoinAnd (src : Option FileRange) (es : List StmtExprMd) : StmtExprMd :=
+  es.foldl (andMd src) ⟨ .LiteralBool true, src ⟩
+
+/-! ### Virtual-dispatch family naming
+
+The synthetic names minted for a virtual-dispatch family, in ONE place so the mint
+sites (LiftInstanceProcedures, CheckOverrideRefinement) and the match site
+(HeapParameterization's `$impl`-detection in `unifyDispatchFamilyHeap`) cannot drift.
+All use `$` as the separator — already a reserved-by-convention synthetic marker
+(`$body`, `$heap`); a user identifier colliding with one of these is caught fail-loud
+at re-resolution (see `LaurelCompilationPipeline`'s duplicate-definition net). -/
+
+/-- Top-level name for a lifted instance method (also the dispatcher name when the
+    method is virtual): `T$m`. -/
+def liftedProcName (typeName methodName : Identifier) : Identifier :=
+  {mkId s!"{typeName.text}${methodName.text}" with source := methodName.source}
+
+/-- Name of the synthesized downcast helper for type `T`: `downcast$T`. Shared by
+    `TypeHierarchy` (which synthesizes `function downcast$T(p: T): T requires (p is T)`)
+    and `HeapParameterization` (whose `AsType` arms emit a call to it), so the emitter
+    and the definition cannot drift. -/
+def downcastProcName (typeName : Identifier) : Identifier :=
+  {mkId s!"downcast${typeName.text}" with source := typeName.source}
+
+/-- The `$impl` marker appended to a method's real (non-dispatcher) implementation.
+    Not necessarily a trailing suffix: monomorphization appends its own `$a{n}$…`
+    instantiation tag after it (`Box$get$impl$a1$int`), so callers that DETECT an
+    impl proc must use a substring test (`isImplProc`), never `endsWith`. -/
+def implTag : String := "$impl"
+
+/-- Name for the real implementation of a method on `typeName`, a dispatcher branch
+    target: `T$m$impl`. -/
+def implProcName (typeName methodName : Identifier) : Identifier :=
+  {mkId s!"{typeName.text}${methodName.text}{implTag}" with source := methodName.source}
+
+/-- Does `n` name a method implementation (`…$impl` or `…$impl$a{n}$…`)? The `$impl`
+    marker must appear as a complete segment: at the END of the name, or immediately
+    followed by `$` (the monomorphization tag separator, `Box$get$impl$a1$int`). A plain
+    substring test would over-match a user method whose name merely CONTAINS `$impl` as a
+    prefix of a longer segment (e.g. `T$implement`, `T$impls`), spuriously classifying it
+    an impl proc in `unifyDispatchFamilyHeap`. Not `endsWith` (the mono tag follows). -/
+def isImplProc (n : String) : Bool :=
+  n.endsWith implTag || (n.splitOn (implTag ++ "$")).length > 1
+
+/-- The local name a dispatcher branch binds for the downcast receiver: `$self$O`. -/
+def dispatchCastName (overriderName : Identifier) : Identifier :=
+  mkId s!"$self${overriderName.text}"
+
+/-- The name of a Liskov refinement checker / its child-spec companion for `child.m`.
+    `suffix` is `"refines$pre"`, `"refines$post"`, or `"childspec"`. -/
+def refinementProcName (childTypeName methodName : Identifier) (suffix : String) : Identifier :=
+  {mkId s!"{childTypeName.text}${methodName.text}${suffix}" with source := methodName.source}
+
+/-- The non-`free` conditions of `cs`. A `free` condition is ASSUMED, not checked, so
+    it is never a guarantee a caller may rely on — every place that turns a contract
+    into an obligation (a dispatcher's conveyed posts, a Liskov pre/post checker) must
+    drop the free ones first. Centralizes the `filter (fun c => !c.free)` the dispatch
+    and refinement passes hand-rolled at several sites. -/
+def nonFreeConditions (cs : List Condition) : List Condition :=
+  cs.filter (fun c => !c.free)
+
+/-- A `StaticCall` to `callee` with `args`, ASSIGNED to `outputs` (one `.Local`
+    target each) when the callee returns values, or left as a bare call expression
+    when `outputs` is empty. Shared by the dynamic-dispatch dispatcher (each branch
+    calls a `$impl`) and the Liskov post-checker (calls the `$childspec` companion).
+    The void case is left a bare call deliberately — block-wrapping for branch
+    symmetry (a void heap-writer's `$heap`-threaded call) is the caller's concern. -/
+def mkCallAssigningOutputs (src : Option FileRange) (callee : Identifier)
+    (args : List StmtExprMd) (outputs : List Parameter) : StmtExprMd :=
+  let call : StmtExprMd := ⟨ .StaticCall callee args, src ⟩
+  match outputs with
+  | [] => call
+  | outs => ⟨ .Assign (outs.map fun o => ⟨ .Local o.name, src ⟩) call, src ⟩
+
+/-- Positional alignment map from a SOURCE procedure's parameter names to a TARGET
+    procedure's, over inputs then outputs (outputs inserted last ⇒ they win a
+    name collision). `zip` truncates to the shorter list, so on arity mismatch
+    surplus source names are left UNMAPPED (a later unresolved reference fails loud
+    rather than silently passing). Used to express one procedure's contract in
+    terms of another's parameters (e.g. a parent method's contract over a child
+    method's names, or an overrider's over a dispatcher's). -/
+def alignParamMap (source target : Procedure) : Std.HashMap String Identifier :=
+  (source.inputs.zip target.inputs ++ source.outputs.zip target.outputs).foldl
+    (fun m st => m.insert st.1.name.text st.2.name) {}
+
+/-- Rename free `.Var (.Local _)` references in an expression from a SOURCE
+    procedure's parameter names to a TARGET procedure's (via `alignParamMap`).
+    ARGUMENT ORDER IS LOAD-BEARING: the contract being rewritten belongs to
+    `source`; it is re-expressed in `target`'s names. Touches only local-variable
+    leaves — never `.Var (.Field _)` receivers, type-level names, or structure. -/
+def renameProcLocals (source target : Procedure) : StmtExprMd → StmtExprMd :=
+  let ren := alignParamMap source target
+  mapStmtExpr (fun n => match n.val with
+    | .Var (.Local r) =>
+      match ren.get? r.text with
+      | some r' => { n with val := .Var (.Local r') }
+      | none => n
+    | _ => n)
+
 /--
 Bottom-up monadic traversal where `post` returns a list of statements, and both
 callbacks are told whether the node's *result is used* (`resultUsed`, threaded

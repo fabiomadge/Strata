@@ -38,10 +38,6 @@ Then, rewrite caller-side of `obj#proc` to call the lifted procedure
 
 -/
 
-/-- Top-level name produced for a lifted instance procedure. -/
-def liftedProcName (typeName methodName : Identifier) : Identifier :=
-  {mkId s!"{typeName.text}${methodName.text}" with source := methodName.source}
-
 /-- Rewrite a single node so that any callee resolving to an instance procedure
     is replaced by its lifted name. -/
 private def rewriteCallNode (model : SemanticModel) (expr : StmtExprMd) : StmtExprMd :=
@@ -62,6 +58,193 @@ private def rewriteCallNode (model : SemanticModel) (expr : StmtExprMd) : StmtEx
       { expr with val := .StaticCall lifted (target :: args) }
     | _ => expr
   | _ => expr
+
+/-! ## Dynamic dispatch: tag-switch dispatcher generation
+
+When a method `m` declared on a composite `D` is OVERRIDDEN by a strict descendant,
+the lifted `D$m` is generated as a runtime-tag DISPATCHER rather than `D`'s body
+verbatim, so a call on a `D`-typed receiver holding a more-derived value runs the
+derived override (matching Java/C# semantics). Concretely:
+
+* every declaring type `T` in the family gets its real body lifted to `T$m$impl`;
+* `D$m` becomes `if self is O₁ then O₁$m$impl(self as O₁, …) else … else D$m$impl(self, …)`
+  over `D`'s descendant-overriders `Oᵢ` (most-derived first), carrying `D`'s own
+  contract so callers see the static contract.
+
+This is SOUND because the separate behavioral-subtyping (Liskov) checks
+(`CheckOverrideRefinement`, run just before this pass) guarantee every override
+refines its parent's contract, so each branch's impl postcondition implies `D`'s.
+Methods overridden nowhere keep today's plain `D$m = body` (no dispatcher, no
+`$impl`), so non-inheriting code is byte-identical. -/
+
+-- The family predicates below are SHARED with `CheckOverrideRefinement` (the Liskov
+-- pass), so they must be public — see `isVirtualDispatchMethod`.
+public section
+
+/-- Does `ct` declare a method named `mname` (vs inherit it)? -/
+def declaresMethod (ct : CompositeType) (mname : String) : Bool :=
+  ct.instanceProcedures.any (·.name.text == mname)
+
+/-- The strict descendants of `ancestorName` that DECLARE `mname`, i.e. the
+    overrides visible through an `ancestorName`-typed receiver. Ordered
+    most-derived first (deeper `ancestors`-distance first), so the generated
+    `is`-chain tests the most specific type before its supertypes — required
+    because a value `is` all of its ancestors. -/
+def descendantOverriders (model : SemanticModel) (program : Program)
+    (ancestorName : Identifier) (mname : String) : List CompositeType :=
+  let composites := program.types.filterMap fun td =>
+    match td with | .Composite ct => some ct | _ => none
+  -- T is a strict descendant of `ancestorName` iff `ancestorName` is among T's
+  -- ancestors and T ≠ ancestorName. Tag each with its ancestor-distance to order.
+  let tagged := composites.filterMap fun t =>
+    if t.name.text == ancestorName.text then none
+    else if declaresMethod t mname then
+      let anc := (computeAncestors model t.name).map (·.name.text)
+      if anc.contains ancestorName.text
+      then some (t, anc.length)  -- deeper subtype ⇒ longer ancestor chain
+      else none
+    else none
+  -- Most-derived (longest ancestor chain) first. `qsort` is NOT stable, so the order
+  -- of equal-distance SIBLINGS would otherwise be an arbitrary quicksort artifact
+  -- sensitive to `program.types` declaration order; the name tiebreaker makes sibling
+  -- dispatch order deterministic and source-order-independent. Ordering is a determinism
+  -- concern, not a soundness one: with single inheritance a value `is` exactly one
+  -- sibling's type. (Under MULTIPLE inheritance a value can `is` two siblings at once;
+  -- that case is not mis-verified — `dispatcherPosts` promises each matched overrider's
+  -- post while the body runs only the first-tested branch, so the un-run branch's post is
+  -- generally unprovable and the dispatcher VC fails loud rather than accepting.)
+  (tagged.toArray.qsort (fun a b =>
+    if a.2 > b.2 then true
+    else if a.2 < b.2 then false
+    else a.1.name.text < b.1.name.text)).toList.map (·.1)
+
+/-! ### Dynamic-dispatch family predicates (the SINGLE source of truth for both
+    the dispatcher generation here AND the Liskov refinement check in
+    `CheckOverrideRefinement`). Keeping these in ONE place is load-bearing for
+    SOUNDNESS: a method that gets a runtime-tag dispatcher (becomes virtual) MUST
+    also get its override-refinement checked, else dynamic dispatch would run an
+    override whose contract was never verified to refine the parent. The two passes
+    therefore gate on the SAME `isVirtualDispatchMethod`. -/
+
+/-- `mname` declared on `declarerName` is overridden within its inheritance family:
+    some strict descendant declares it, OR some strict ancestor declares it. -/
+def isOverriddenMethod (model : SemanticModel) (program : Program)
+    (declarerName : Identifier) (mname : String) : Bool :=
+  (! (descendantOverriders model program declarerName mname).isEmpty)
+  || ((computeAncestors model declarerName).drop 1).any (fun anc =>
+        anc.instanceProcedures.any (·.name.text == mname))
+
+/-- THE shared gate: a method dispatched virtually (gets a dispatcher) AND, by the
+    same predicate, gets its override-refinement (Liskov) checked. Both passes call
+    this so the two cannot drift into the unsound "dispatcher without checker" state.
+
+    Generic inheriting families ARE supported: the dispatcher's `is`/`as` tag-tests use
+    the applied form (`appliedTagType`, so `self is SBox<T>` not bare `SBox`), and the
+    Liskov checker carries the composite's type params so it monomorphizes per
+    instantiation. So any overridden method — generic or not — is virtual + checked. -/
+def isVirtualDispatchMethod (model : SemanticModel) (program : Program)
+    (declarerName : Identifier) (mname : String) : Bool :=
+  isOverriddenMethod model program declarerName mname
+
+end -- public section (shared family predicates)
+
+/-- The type used in a dispatcher's `is`/`as` tag-test for branch type `ct`: a bare
+    `.UserDefined` for a non-generic composite, but an applied `.Applied ct<T…>` for a
+    generic one (a bare un-applied generic head is rejected by re-resolution's
+    `Synth.isType`). The generic branch applies `ct` to its OWN declared params as
+    `.TVar`s. For the idiomatic same-named override (`SBox<T> extends Box<T>`) these are
+    exactly the dispatcher's params, so the tag-test resolves; a RENAMED override
+    (`SBox<U> extends Box<U>`) would emit a param the dispatcher doesn't carry and is
+    rejected fail-loud at re-resolution (never mis-verified). Used by BOTH the dispatcher
+    body (`buildDispatcherBody`) and its
+    tag-conditioned postconditions (`dispatcherPosts`) — keeping the construction in
+    ONE place so the two cannot drift (a drift would mean the posts test a different
+    type than the body dispatches on: a soundness hole or a resolution failure). -/
+private def appliedTagType (src : Option FileRange) (ct : CompositeType) : HighTypeMd :=
+  if ct.typeArgs.isEmpty then ⟨ .UserDefined ct.name, src ⟩
+  else ⟨ .Applied ⟨ .UserDefined ct.name, src ⟩
+        (ct.typeArgs.map (fun a => (⟨ .TVar a, src ⟩ : HighTypeMd))), src ⟩
+
+/-- Build the dispatcher body for `method` on `ownerType`, branching over
+    `overriders` (most-derived first) and falling through to `ownerType`'s own
+    impl. Each branch casts `self` to the branch type (sound: guarded by the
+    preceding `is`), then calls that type's `$impl`. Mirrors the hand-verified
+    `if self is Sub then (self as Sub)#m_impl else …` dispatcher shape. -/
+private def buildDispatcherBody (ownerType : Identifier) (method : Procedure)
+    (overriders : List CompositeType) : AstNode StmtExpr :=
+  let src := method.name.source
+  let selfName := (method.inputs.head?.map (·.name)).getD (mkId "self")
+  -- non-self inputs, as Local-ref arguments (shared by every branch)
+  let restArgs : List (AstNode StmtExpr) :=
+    (method.inputs.drop 1).map fun p => ⟨ .Var (.Local p.name), src ⟩
+  -- a call `Target$m$impl(recv, restArgs...)`, assigned to the outputs (if any)
+  let callTo (target : Identifier) (recv : AstNode StmtExpr) : AstNode StmtExpr :=
+    mkCallAssigningOutputs src target (recv :: restArgs) method.outputs
+  -- the else (fallthrough): owner's own impl, self uncast (already : ownerType).
+  -- Wrapped in a `.Block` so it is STRUCTURALLY symmetric with the `then` branches
+  -- (which are blocks): an `if` synthesizes+joins both branch types, and a bare call
+  -- vs a block-wrapped call can synthesize different types for a void heap-writer
+  -- (whose `$heap`-threaded call resolves to `Heap` bare but `void` as a block tail),
+  -- producing a spurious "'if' branches have incompatible types 'Heap' and 'void'".
+  let fallthrough : AstNode StmtExpr :=
+    ⟨ .Block [callTo (implProcName ownerType method.name) ⟨ .Var (.Local selfName), src ⟩] none, src ⟩
+  -- fold the overriders into a most-derived-first `is`/`as` chain
+  overriders.foldr (init := fallthrough) fun ov acc =>
+    -- tag-test type: applied-when-generic (shared with `dispatcherPosts`, see `appliedTagType`)
+    let ovTy : HighTypeMd := appliedTagType src ov
+    let isCheck : AstNode StmtExpr := ⟨ .IsType ⟨ .Var (.Local selfName), src ⟩ ovTy, src ⟩
+    let castName := dispatchCastName ov.name
+    let castDecl : AstNode StmtExpr :=
+      ⟨ .Assign [⟨ .Declare ⟨castName, ovTy⟩, src ⟩]
+        ⟨ .AsType ⟨ .Var (.Local selfName), src ⟩ ovTy, src ⟩, src ⟩
+    let branchCall := callTo (implProcName ov.name method.name) ⟨ .Var (.Local castName), src ⟩
+    let thenBlock : AstNode StmtExpr := ⟨ .Block [castDecl, branchCall] none, src ⟩
+    ⟨ .IfThenElse isCheck thenBlock (some acc), src ⟩
+
+/-- The postconditions of `D$m`'s dispatcher, tag-conditioned so each holds on the
+    branch that runs. Because `m` is opaque, callers reason against these (not the body):
+
+    * owner `D`'s own posts, guarded `(!(self is O₁) & … & !(self is Oₙ)) ==> D.post` —
+      they hold on the fallthrough path. The guard is essential: an UNguarded `D.post`
+      would be promised even when the body runs an override returning a different value,
+      which `D$m` could not prove. (The guard uses ancestor-membership `is`; since the
+      branches are checked most-derived-first the body still picks the right impl.)
+    * each overrider `Oᵢ`'s posts, `(self is Oᵢ) ==> Oᵢ.post` — so a caller that knows
+      the runtime tag (after `is`/`as`, or via a more-derived static type) recovers the
+      override's STRONGER guarantee through a `D`-typed reference.
+
+    SOUND: each clause is discharged by the matching dispatcher branch, whose `$impl`
+    postcondition is exactly that type's post. (Cross-branch `is`-overlap — a deeper
+    descendant `is` a shallower one — is handled by the body order and the guard; a
+    Liskov-valid hierarchy keeps the clauses mutually consistent, since `Oᵢ.post ⟹ Oⱼ.post`
+    whenever `Oᵢ <: Oⱼ`.) Overrider posts are renamed (self+outputs, positionally). -/
+private def dispatcherPosts (ownerPosts : List Condition) (method : Procedure)
+    (overriders : List CompositeType) : List Condition :=
+  let src := method.name.source
+  let selfName := (method.inputs.head?.map (·.name)).getD (mkId "self")
+  -- tag-test type shared with the dispatcher body (`appliedTagType`): applied-when-generic,
+  -- so the posts test the SAME type the body dispatches on (must not drift).
+  let isOf (ct : CompositeType) : StmtExprMd :=
+    ⟨ .IsType ⟨ .Var (.Local selfName), src ⟩ (appliedTagType src ct), src ⟩
+  let overriderPosts : List Condition := overriders.filterMap fun ov =>
+    match ov.instanceProcedures.find? (·.name.text == method.name.text) with
+    | none => none
+    | some ovProc =>
+      -- re-express the overrider's contract in the dispatcher's parameter names
+      let rename := renameProcLocals ovProc method
+      let ovPostsAll : List Condition := match ovProc.body with
+        | .Opaque posts _ _ => posts
+        | .Abstract posts => posts
+        | _ => []
+      match nonFreeConditions ovPostsAll with
+      | [] => none
+      | ovPosts =>
+        let conj := conjoinAnd src (ovPosts.map (fun c => rename c.condition))
+        some { condition := impliesMd src (isOf ov) conj }
+  let notAnyOverrider : StmtExprMd := conjoinAnd src (overriders.map (fun ov => notMd src (isOf ov)))
+  let guardedOwnerPosts : List Condition := (nonFreeConditions ownerPosts).map fun c =>
+    { c with condition := impliesMd src notAnyOverrider c.condition }
+  guardedOwnerPosts ++ overriderPosts
 
 /-- Apply call-site rewriting to every expression in a procedure. -/
 private def rewriteCallsInProc (model : SemanticModel) (proc : Procedure) : Procedure :=
@@ -101,13 +284,53 @@ def liftInstanceProcedures (model : SemanticModel) (program : Program) : Program
   -- shape the procedure monomorphizer (running AFTER this pass) already handles, so no
   -- new machinery is needed. A non-generic composite contributes `[]`, leaving a
   -- non-generic method's `typeArgs` unchanged.
+  --
+  -- DYNAMIC DISPATCH: if a method is overridden by a strict descendant, its lifted
+  -- entry `T$m` is generated as a runtime-tag DISPATCHER and the real body is lifted
+  -- to `T$m$impl`; otherwise `T$m` is the body verbatim (today's static behavior).
+  -- The dispatcher carries the method's own contract (preconditions kept; the body
+  -- becomes the tag-switch, whose branch `$impl` postconditions imply it by the
+  -- Liskov refinement checks run in the previous pass).
+  --
+  -- A method `m` is POLYMORPHIC if it is declared on more than one type within a
+  -- single inheritance family (i.e. some type's `m` is overridden by a descendant,
+  -- OR equivalently some declarer has a strict ancestor that also declares `m`).
+  -- Every declarer of a polymorphic `m` emits BOTH `T$m$impl` (its real body) and a
+  -- dispatcher `T$m` over its own descendant-overriders — so the `$impl` branch
+  -- targets a dispatcher references always exist, even for a leaf override.
+  -- Dispatcher generation uses the SHARED `isVirtualDispatchMethod` gate (defined
+  -- above, also called by `CheckOverrideRefinement`) so the two passes cannot drift
+  -- into a dispatcher-without-Liskov-checker (unsound) state. It is true whenever `m`
+  -- is overridden anywhere in its inheritance family — GENERIC families included
+  -- (their dispatchers/checkers carry the composite's type params and monomorphize via
+  -- the existing machinery; the `is`/`as` tag-tests use the applied form, `appliedTagType`).
   let liftedProcs : List Procedure :=
     program.types.foldl (init := []) fun acc td =>
       match td with
       | .Composite ct =>
-        acc ++ ct.instanceProcedures.map fun proc =>
-          { proc with name := liftedProcName ct.name proc.name,
-                      typeArgs := ct.typeArgs ++ proc.typeArgs }
+        acc ++ ct.instanceProcedures.flatMap fun proc =>
+          let tyArgs := ct.typeArgs ++ proc.typeArgs
+          if ! isVirtualDispatchMethod model program ct.name proc.name.text then
+            -- monomorphic method ⇒ plain static lift (unchanged behavior)
+            [{ proc with name := liftedProcName ct.name proc.name, typeArgs := tyArgs }]
+          else
+            -- polymorphic: real body → `T$m$impl`; `T$m` → dispatcher (same contract).
+            let overriders := descendantOverriders model program ct.name proc.name.text
+            let impl := { proc with name := implProcName ct.name proc.name, typeArgs := tyArgs }
+            -- dispatcher postconditions: owner's own posts guarded by the fallthrough
+            -- condition + each overrider's posts guarded by its tag (precision).
+            let dispatcherBody : Body := match proc.body with
+              | .Transparent _ => .Transparent (buildDispatcherBody ct.name proc overriders)
+              | .Opaque posts _ modif =>
+                  .Opaque (dispatcherPosts posts proc overriders)
+                    (some (buildDispatcherBody ct.name proc overriders)) modif
+              | .Abstract posts =>
+                  .Opaque (dispatcherPosts posts proc overriders)
+                    (some (buildDispatcherBody ct.name proc overriders)) []
+              | .External => .External
+            let dispatcher := { proc with name := liftedProcName ct.name proc.name,
+                                          typeArgs := tyArgs, body := dispatcherBody }
+            [impl, dispatcher]
       | _ => acc
 
   if liftedProcs.isEmpty then program else

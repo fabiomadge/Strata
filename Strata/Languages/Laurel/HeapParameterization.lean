@@ -477,10 +477,19 @@ where
     | .New .. => return [exprMd]
     | .ReferenceEquals l r => return [⟨ .ReferenceEquals (← recurseOne l) (← recurseOne r), source ⟩]
     | .AsType t ty =>
+        -- `x as T` lowers to a call to the synthesized `downcast$T` helper (defined in
+        -- TypeHierarchy, the next pass). Its `requires (x is T)` precondition is discharged
+        -- by PrecondElim as a well-definedness obligation — so the cast works in a contract
+        -- formula (which cannot contain a statement `{ assert (x is T); x }` block) as well
+        -- as in a body. Falls back to the assert-block only for a target with no base name
+        -- (should not occur for a real composite cast).
         let t' ← recurseOne t valueUsed
-        let isCheck := ⟨ .IsType t' ty, source ⟩
-        let assertStmt := ⟨ .Assert { condition := isCheck }, source ⟩
-        return [⟨ .Block [assertStmt, t'] none, source ⟩]
+        match highBaseName? ty.val with
+        | some tn => return [⟨ .StaticCall (downcastProcName tn) [t'], source ⟩]
+        | none =>
+            let isCheck := ⟨ .IsType t' ty, source ⟩
+            let assertStmt := ⟨ .Assert { condition := isCheck }, source ⟩
+            return [⟨ .Block [assertStmt, t'] none, source ⟩]
     | .IsType t ty => return [⟨ .IsType (← recurseOne t) ty, source ⟩]
     | .Quantifier mode p trigger b =>
       let trigger' ← trigger.attach.mapM fun ⟨t, _⟩ => recurseOne t
@@ -512,21 +521,25 @@ where
       simp_all
       omega)
 
-/-- Lower ONLY `AsType` nodes (`x as T` → `{ assert (x is T); x }`), recursing
-    structurally and leaving every other node untouched. This is the
-    heap-INDEPENDENT half of the `.AsType` rewrite in `heapTransformExpr`
-    (line ~482), factored out for the heap-neutral procedure branch: such a
-    procedure must NOT receive the heap-dependent rewrites (field access,
-    Composite `==` → reference compare — the latter mis-fires on a
-    constrained/`.UserDefined` non-composite operand), but it MUST still have its
-    `as` casts lowered or the Core translator hard-fails (`NotYetImplemented`).
-    Bottom-up, so nested casts (`(x as A) as B`) lower correctly. -/
+/-- Lower ONLY `AsType` nodes (`x as T` → a `downcast$T(x)` call; assert-block fallback
+    only for a target with no base name), recursing structurally and leaving every other
+    node untouched. This is the heap-INDEPENDENT half of the `.AsType` rewrite in
+    `heapTransformExpr` (line ~482), factored out for the heap-neutral procedure branch:
+    such a procedure must NOT receive the heap-dependent rewrites (field access, Composite
+    `==` → reference compare — the latter mis-fires on a constrained/`.UserDefined`
+    non-composite operand), but it MUST still have its `as` casts lowered or the Core
+    translator hard-fails (`NotYetImplemented`). Bottom-up, so nested casts
+    (`(x as A) as B`) lower correctly. -/
 def lowerAsTypeOnly (expr : StmtExprMd) : StmtExprMd :=
   mapStmtExpr (fun e => match e.val with
     | .AsType t ty =>
-      let isCheck : StmtExprMd := ⟨ .IsType t ty, e.source ⟩
-      let assertStmt : StmtExprMd := ⟨ .Assert { condition := isCheck }, e.source ⟩
-      ⟨ .Block [assertStmt, t] none, e.source ⟩
+      -- Same `downcast$T` routing as the heap-touching arm (see `heapTransformExpr`).
+      match highBaseName? ty.val with
+      | some tn => ⟨ .StaticCall (downcastProcName tn) [t], e.source ⟩
+      | none =>
+        let isCheck : StmtExprMd := ⟨ .IsType t ty, e.source ⟩
+        let assertStmt : StmtExprMd := ⟨ .Assert { condition := isCheck }, e.source ⟩
+        ⟨ .Block [assertStmt, t] none, e.source ⟩
     | _ => e) expr
 
 def heapTransformProcedure (model: SemanticModel) (proc : Procedure) : TransformM Procedure := do
@@ -622,11 +635,58 @@ def heapTransformProcedure (model: SemanticModel) (proc : Procedure) : Transform
       body := body'
       preconditions := proc.preconditions.map (·.mapCondition lowerAsTypeOnly) }
 
+/-- Make a virtual-dispatch family's heap-status UNIFORM. A dispatcher `T$m` is an
+    if-chain calling each branch's `…$m$impl`; heap-status is computed PER `$impl`, so a
+    mixed family (parent method heap-neutral, an override heap-writing — or vice versa)
+    gives the dispatcher one branch that threads `$heap` (value `Heap`) and one that does
+    not (value `void`), and the two `if` branches fail to type-join ("incompatible types
+    'Heap' and 'void'"). The dispatcher itself is already classified read/write (it calls a
+    reader/writer transitively), so propagate that DOWN: every `$impl` a reader/writer
+    dispatcher calls becomes a reader/writer too, then re-close the transitive fixpoint
+    (a newly-promoted `$impl` may make its own callers heap-touching). Identified
+    structurally — a "dispatcher" is any proc that calls an `…$impl…` — not by hard-coding
+    a name shape: the `$impl` marker and its substring (not suffix) detection live in ONE
+    place, `MapStmtExpr.implTag`/`isImplProc`, shared with the mint site (`implProcName`). -/
+def unifyDispatchFamilyHeap (procs : List Procedure)
+    (readers writers : List Identifier) : List Identifier × List Identifier := Id.run do
+  let info := procs.map fun p => (p.name.text, analyzeProc p)
+  -- dispatcher → its `$impl` branch targets
+  let implCallees (callees : List Identifier) : List String :=
+    (callees.map (·.text)).filter isImplProc
+  -- one promotion round for a given status set: an `$impl` called by an in-set dispatcher joins the set
+  let promote (cur : List String) : List String := Id.run do
+    let mut s := cur
+    for (nm, r) in info do
+      if cur.contains nm then
+        for impl in implCallees r.callees do
+          unless s.contains impl do s := s ++ [impl]
+    return s
+  -- re-close transitivity after promotion (a promoted `$impl`'s callers become heap-touching)
+  let close (seed : List String) : List String := Id.run do
+    let mut cur := seed
+    let mut fuel := procs.length + 1
+    while fuel > 0 do
+      fuel := fuel - 1
+      let next := info.foldl (fun acc (nm, r) =>
+        if acc.contains nm then acc
+        else if (r.callees.map (·.text)).any acc.contains then acc ++ [nm] else acc) cur
+      if next.length == cur.length then fuel := 0 else cur := next
+    return cur
+  let fixStatus (initial : List Identifier) : List Identifier :=
+    let names := close (promote (initial.map (·.text)))
+    procs.filterMap (fun p => if names.contains p.name.text then some p.name else none)
+  return (fixStatus readers, fixStatus writers)
+
 def heapParameterization (model: SemanticModel) (program : Program) : Program :=
   -- Instance procedures are already lifted to `staticProcedures` by an earlier
   -- pass, so they're covered by the calls below.
-  let heapReaders := computeReadsHeap program.staticProcedures
-  let heapWriters := computeWritesHeap program.staticProcedures
+  let heapReaders0 := computeReadsHeap program.staticProcedures
+  let heapWriters0 := computeWritesHeap program.staticProcedures
+  -- Unify each dispatch family's heap-status so a dispatcher's `if` branches agree (see
+  -- `unifyDispatchFamilyHeap`): a mixed-modifies override family would otherwise fail to
+  -- type-join (`Heap` vs `void`) at re-resolution.
+  let (heapReaders, heapWriters) :=
+    unifyDispatchFamilyHeap program.staticProcedures heapReaders0 heapWriters0
   let initState : TransformState := { heapReaders, heapWriters }
   let (procs', state1) := (program.staticProcedures.mapM (heapTransformProcedure model)).run initState
   -- Collect all qualified field names and generate a Field datatype
