@@ -53,10 +53,10 @@ call site).
 
 namespace Strata.Laurel
 
-/-- The postconditions and modifies declared by a procedure body, plus whether a
-    given condition is `free`. Abstract and Opaque bodies carry postconditions;
-    Transparent/External carry none here (their guarantees are their visible body,
-    not a refinable contract). -/
+/-- The postconditions declared by a procedure body. Abstract and Opaque bodies carry
+    them; Transparent/External carry none here (their guarantees are their visible body,
+    not a refinable contract). Each returned `Condition` keeps its own `free` flag; the
+    `modifies` clause is separate (see `bodyModifies`). -/
 def bodyPostconditions : Body → List Condition
   | .Opaque posts _ _ => posts
   | .Abstract posts => posts

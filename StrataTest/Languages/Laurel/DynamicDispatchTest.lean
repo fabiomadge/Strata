@@ -399,15 +399,15 @@ procedure u() opaque { var o: Parent := new Child; assign var p: int, var q: int
   -- MULTI-ARG method whose ARGUMENT participates in the post: pins `restArgs` threading
   -- (self + 2 args forwarded in order) and positional Liskov param alignment over 3 inputs.
   { name := "dispatch_multiarg_in_post", outcome := .verifies,
-    why := "`o#m(3, 4)` on an override `ensures r == a + b` dispatches with args forwarded in order (r==7); Parent.post is `true` so the override refines it"
+    why := "`o#m(3, 4)` on an override `ensures r == a - b` dispatches with args forwarded IN ORDER (r == 3-4 == -1); a NON-commutative body so a swapped-arg dispatcher would give +1 and fail. Parent.post is `true` so the override refines it"
     src := r"
 composite Parent { var x: int
   procedure m(self: Parent, a: int, b: int) returns (r: int) opaque ensures true { r := 0 };
 }
 composite Child extends Parent {
-  procedure m(self: Child, a: int, b: int) returns (r: int) opaque ensures r == a + b { r := a + b };
+  procedure m(self: Child, a: int, b: int) returns (r: int) opaque ensures r == a - b { r := a - b };
 }
-procedure u() opaque { var o: Parent := new Child; var r: int := o#m(3, 4); assert r == 7 };"},
+procedure u() opaque { var o: Parent := new Child; var r: int := o#m(3, 4); assert r == -1 };"},
   { name := "dispatch_through_field", outcome := .verifies,
     why := "a composite field `h#p : Parent` holding a Child dispatches to Child.m on `h#p#m()` (r==2)"
     src := r"

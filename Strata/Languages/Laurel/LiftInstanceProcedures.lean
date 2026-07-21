@@ -107,9 +107,12 @@ def descendantOverriders (model : SemanticModel) (program : Program)
   -- Most-derived (longest ancestor chain) first. `qsort` is NOT stable, so the order
   -- of equal-distance SIBLINGS would otherwise be an arbitrary quicksort artifact
   -- sensitive to `program.types` declaration order; the name tiebreaker makes sibling
-  -- dispatch order deterministic and source-order-independent. Sound either way —
-  -- dispatch is by runtime tag, not branch position (a value `is` exactly one sibling's
-  -- type, never two).
+  -- dispatch order deterministic and source-order-independent. Ordering is a determinism
+  -- concern, not a soundness one: with single inheritance a value `is` exactly one
+  -- sibling's type. (Under MULTIPLE inheritance a value can `is` two siblings at once;
+  -- that case is not mis-verified — `dispatcherPosts` promises each matched overrider's
+  -- post while the body runs only the first-tested branch, so the un-run branch's post is
+  -- generally unprovable and the dispatcher VC fails loud rather than accepting.)
   (tagged.toArray.qsort (fun a b =>
     if a.2 > b.2 then true
     else if a.2 < b.2 then false
@@ -148,9 +151,12 @@ end -- public section (shared family predicates)
 /-- The type used in a dispatcher's `is`/`as` tag-test for branch type `ct`: a bare
     `.UserDefined` for a non-generic composite, but an applied `.Applied ct<T…>` for a
     generic one (a bare un-applied generic head is rejected by re-resolution's
-    `Synth.isType`). The generic branch shares the dispatcher's type parameters, so
-    `ct` is applied to its OWN declared params as `.TVar`s (which the lifted dispatcher
-    carries). Used by BOTH the dispatcher body (`buildDispatcherBody`) and its
+    `Synth.isType`). The generic branch applies `ct` to its OWN declared params as
+    `.TVar`s. For the idiomatic same-named override (`SBox<T> extends Box<T>`) these are
+    exactly the dispatcher's params, so the tag-test resolves; a RENAMED override
+    (`SBox<U> extends Box<U>`) would emit a param the dispatcher doesn't carry and is
+    rejected fail-loud at re-resolution (never mis-verified). Used by BOTH the dispatcher
+    body (`buildDispatcherBody`) and its
     tag-conditioned postconditions (`dispatcherPosts`) — keeping the construction in
     ONE place so the two cannot drift (a drift would mean the posts test a different
     type than the body dispatches on: a soundness hole or a resolution failure). -/

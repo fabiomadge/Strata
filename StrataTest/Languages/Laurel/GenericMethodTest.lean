@@ -221,7 +221,7 @@ procedure u() opaque { var b: Box<int> := new Box<int>; var p: Other<int> := b; 
   -- The receiver is `D<int>` (an `.Applied` type), so the diamond check must peel the base
   -- name — else the access is missed pre-monomorphization and surfaces as an internal error
   -- when the monomorph re-resolves.
-  { name := "diamond_field_generic_receiver", outcome := .rejected (some .UserError),
+  { name := "diamond_field_generic_receiver", outcome := .rejectedExactly .UserError,
     why := "a diamond-inherited field read on a generic receiver `D<int>` must be REJECTED cleanly (peel `.Applied` to base name) — a `.UserError`, not an internal error"
     src := r"
 composite Top<T> { var f: T }
@@ -234,7 +234,7 @@ procedure u() opaque { var d: D<int> := new D<int>; var x: int := d#f; assert 1 
   -- `validateDiamondFieldAccesses` must walk instance-method bodies, not only lifted
   -- `staticProcedures` — else the access is missed at the initial resolve and only surfaces
   -- post-lift as a `.StrataBug` from the re-resolution net instead of this clean `.UserError`.
-  { name := "diamond_field_in_method", outcome := .rejected (some .UserError),
+  { name := "diamond_field_in_method", outcome := .rejectedExactly .UserError,
     why := "a diamond-inherited field read inside an instance method must be REJECTED as a `.UserError` (the diamond check walks instance methods, not just lifted static procs)"
     src := r"
 composite Top<T> { var f: T }
@@ -259,7 +259,7 @@ procedure u() opaque { var d: D<int> := new D<int>; assert 1 == 1 };"},
   -- sub-expressions (via `mapStmtExprM`), so an ambiguous read in a `forall` is caught
   -- as a clean `.UserError`, not silently accepted (the coverage gap that motivated the
   -- total-traversal rewrite; the same class of skipped positions covers `old`/`as`/`is`).
-  { name := "diamond_field_in_quantifier", outcome := .rejected (some .UserError),
+  { name := "diamond_field_in_quantifier", outcome := .rejectedExactly .UserError,
     why := "a diamond-inherited field read inside a `forall` must be REJECTED — the diamond check covers quantifier bodies, not just statement positions"
     src := r"
 composite Top { var f: int }
@@ -280,7 +280,7 @@ procedure u(d: D) opaque { assume forall(i: int) => d#f >= 0; assert 1 == 1 };"}
   -- (via `mapProcedureM`), not just the body, so an ambiguous read in a `requires`
   -- clause is rejected as a clean `.UserError` (it was silently accepted when the driver
   -- walked only `proc.body`; `invokeOn`/axioms are covered the same way).
-  { name := "diamond_field_in_precondition", outcome := .rejected (some .UserError),
+  { name := "diamond_field_in_precondition", outcome := .rejectedExactly .UserError,
     why := "a diamond-inherited field read in a `requires` precondition must be REJECTED — the diamond check covers all procedure positions, not just the body"
     src := r"
 composite Top { var f: int }
@@ -297,7 +297,7 @@ composite Mid extends Top { }
 composite D extends Mid { }
 procedure u(d: D) requires d#f >= 0 opaque ensures 1 == 1 { };"},
 
-  { name := "diamond_field_in_method_precondition", outcome := .rejected (some .UserError),
+  { name := "diamond_field_in_method_precondition", outcome := .rejectedExactly .UserError,
     why := "a diamond-inherited field read in an INSTANCE-method precondition must be REJECTED — the driver walks instance methods' every position, not only lifted static procs' bodies"
     src := r"
 composite Top { var f: int }
@@ -483,6 +483,29 @@ composite Base<T> { var tag: T }
 composite Box<T> extends Base<T> { var val: T }
 procedure d(base: Base<int>) opaque modifies base { if (base is Box<int>) then { var b: Box<int> := base as Box<int>; b#val := 9; assert b#val == 9 } else { } };
 procedure u() opaque { assert 1 == 1 };"},
+
+  -- `is`/`as` are supported only for COMPOSITE (class) targets: lowering keys off a runtime
+  -- type tag only composites carry. A non-composite target (datatype / primitive / alias /
+  -- constrained) is rejected up front at resolution with ONE clean `.UserError`, rather than
+  -- reaching lowering and dying as a StrataBug (datatype → dangling `downcast$T`) or a
+  -- silently-mis-verifying `.Hole` (primitive `is`). `rejectedExactly` pins the clean single
+  -- diagnostic. Composite `is`/`as` (above) and generic-composite instantiations still work.
+  { name := "as_datatype_target_rejected", outcome := .rejectedExactly .UserError,
+    why := "`w as Wrapper` on a datatype is not a composite cast — rejected cleanly, no dangling downcast$Wrapper StrataBug"
+    src := r"
+datatype Wrapper { MkW(v: int) }
+procedure u() opaque { var w: Wrapper := MkW(3); var w2: Wrapper := w as Wrapper; assert 1 == 1 };"},
+
+  { name := "is_primitive_target_rejected", outcome := .rejectedExactly .UserError,
+    why := "`5 is int` on a primitive is not a composite test — rejected cleanly, not a silently-verifying .Hole"
+    src := r"
+procedure u() opaque { var b: bool := 5 is int; assert b };"},
+
+  { name := "as_constrained_target_rejected", outcome := .rejectedExactly .UserError,
+    why := "`5 as nat` on a constrained type is not a composite cast — rejected cleanly at resolution (unfold sees the base `int`)"
+    src := r"
+constrained nat = x: int where x >= 0 witness 0
+procedure u() opaque { var n: nat := 5 as nat; assert n == 5 };"},
 
   -- SOUNDNESS: `#`-call on a NON-COMPOSITE receiver must be REJECTED, not silently bound to a
   -- same-named top-level static procedure. Was a silent unsound accept: `z#sideEffect(-1)`

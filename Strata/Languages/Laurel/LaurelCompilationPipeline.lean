@@ -121,9 +121,9 @@ def laurelPipeline : Array LoweringPass := #[
   constrainedTypeElimPass,
   filterNonCompositeModifiesPass,
   mergeAndLiftReturnsPass,
-  -- `liftInstanceProceduresPass` runs at position 0 (it must precede monomorphization);
-  -- that also places it before `eliminateValueInReturnsPass`, as value-returning
-  -- instance methods require, so no entry is needed here.
+  -- `liftInstanceProceduresPass` runs near the front (before monomorphization); that
+  -- also places it before `eliminateValueInReturnsPass`, as value-returning instance
+  -- methods require, so no entry is needed here.
   eliminateValueInReturnsPass,
   heapParameterizationPass,
   typeHierarchyTransformPass,

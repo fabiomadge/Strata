@@ -205,11 +205,14 @@ def implTag : String := "$impl"
 def implProcName (typeName methodName : Identifier) : Identifier :=
   {mkId s!"{typeName.text}${methodName.text}{implTag}" with source := methodName.source}
 
-/-- Does `n` name a method implementation (`…$impl…`)? SUBSTRING test, not `endsWith`:
-    monomorphization appends `$a{n}$…` after `implTag`, so an impl proc's final name is
-    e.g. `Box$get$impl$a1$int`. Used by `unifyDispatchFamilyHeap` to find a dispatcher's
-    `$impl` callees. -/
-def isImplProc (n : String) : Bool := (n.splitOn implTag).length > 1
+/-- Does `n` name a method implementation (`…$impl` or `…$impl$a{n}$…`)? The `$impl`
+    marker must appear as a complete segment: at the END of the name, or immediately
+    followed by `$` (the monomorphization tag separator, `Box$get$impl$a1$int`). A plain
+    substring test would over-match a user method whose name merely CONTAINS `$impl` as a
+    prefix of a longer segment (e.g. `T$implement`, `T$impls`), spuriously classifying it
+    an impl proc in `unifyDispatchFamilyHeap`. Not `endsWith` (the mono tag follows). -/
+def isImplProc (n : String) : Bool :=
+  n.endsWith implTag || (n.splitOn (implTag ++ "$")).length > 1
 
 /-- The local name a dispatcher branch binds for the downcast receiver: `$self$O`. -/
 def dispatchCastName (overriderName : Identifier) : Identifier :=

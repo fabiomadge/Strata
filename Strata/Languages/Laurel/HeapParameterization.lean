@@ -521,15 +521,15 @@ where
       simp_all
       omega)
 
-/-- Lower ONLY `AsType` nodes (`x as T` → `{ assert (x is T); x }`), recursing
-    structurally and leaving every other node untouched. This is the
-    heap-INDEPENDENT half of the `.AsType` rewrite in `heapTransformExpr`
-    (line ~482), factored out for the heap-neutral procedure branch: such a
-    procedure must NOT receive the heap-dependent rewrites (field access,
-    Composite `==` → reference compare — the latter mis-fires on a
-    constrained/`.UserDefined` non-composite operand), but it MUST still have its
-    `as` casts lowered or the Core translator hard-fails (`NotYetImplemented`).
-    Bottom-up, so nested casts (`(x as A) as B`) lower correctly. -/
+/-- Lower ONLY `AsType` nodes (`x as T` → a `downcast$T(x)` call; assert-block fallback
+    only for a target with no base name), recursing structurally and leaving every other
+    node untouched. This is the heap-INDEPENDENT half of the `.AsType` rewrite in
+    `heapTransformExpr` (line ~482), factored out for the heap-neutral procedure branch:
+    such a procedure must NOT receive the heap-dependent rewrites (field access, Composite
+    `==` → reference compare — the latter mis-fires on a constrained/`.UserDefined`
+    non-composite operand), but it MUST still have its `as` casts lowered or the Core
+    translator hard-fails (`NotYetImplemented`). Bottom-up, so nested casts
+    (`(x as A) as B`) lower correctly. -/
 def lowerAsTypeOnly (expr : StmtExprMd) : StmtExprMd :=
   mapStmtExpr (fun e => match e.val with
     | .AsType t ty =>
