@@ -88,7 +88,15 @@ def lowerIsType (target : StmtExprMd) (ty : HighTypeMd) (source : Option FileRan
         let innerMap := mkMd (.StaticCall "select" [ancestorsPerType, typeTag])
         let typeConst := mkMd (.StaticCall (mkId $ typeName ++ "_TypeTag") [])
         ⟨.StaticCall "select" [innerMap, typeConst], source⟩
-    | _ => { val := .Hole, source := source }
+    -- INVARIANT: only composite targets reach this pass. Every non-composite
+    -- `is`/`as` (primitive, alias, datatype, constrained) is fully eliminated
+    -- earlier by `ConstrainedTypeElim.resolveExprNode`. A non-composite target
+    -- here is a compiler bug (a slipped elimination). Leave the node UNLOWERED so
+    -- it reaches `LaurelToCoreSchemaPass`'s canonical `.IsType` arm, which fails
+    -- loud with a source-located `.StrataBug` ("IsType should have been lowered") —
+    -- correctly attributed, rather than a dangling synthetic-name call whose
+    -- re-resolution error misblames whichever pass re-resolved next.
+    | _ => ⟨.IsType target ty, source⟩
 
 /-- State for the type hierarchy rewrite monad -/
 structure THState where

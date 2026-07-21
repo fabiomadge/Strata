@@ -484,28 +484,57 @@ composite Box<T> extends Base<T> { var val: T }
 procedure d(base: Base<int>) opaque modifies base { if (base is Box<int>) then { var b: Box<int> := base as Box<int>; b#val := 9; assert b#val == 9 } else { } };
 procedure u() opaque { assert 1 == 1 };"},
 
-  -- `is`/`as` are supported only for COMPOSITE (class) targets: lowering keys off a runtime
-  -- type tag only composites carry. A non-composite target (datatype / primitive / alias /
-  -- constrained) is rejected up front at resolution with ONE clean `.UserError`, rather than
-  -- reaching lowering and dying as a StrataBug (datatype → dangling `downcast$T`) or a
-  -- silently-mis-verifying `.Hole` (primitive `is`). `rejectedExactly` pins the clean single
-  -- diagnostic. Composite `is`/`as` (above) and generic-composite instantiations still work.
-  { name := "as_datatype_target_rejected", outcome := .rejectedExactly .UserError,
-    why := "`w as Wrapper` on a datatype is not a composite cast — rejected cleanly, no dangling downcast$Wrapper StrataBug"
+  -- NON-COMPOSITE `is`/`as` (datatype / primitive / alias / constrained). `ConstrainedTypeElim`
+  -- eliminates these before the composite tag machinery runs: a primitive/datatype/alias target
+  -- is tag-free so `is` is `true` and `as` is the identity (resolution's lineage check already
+  -- validated same-lineage); a CONSTRAINED target carries a real refinement predicate, so `is nat`
+  -- lowers to `nat$constraint(x)` and `as nat` to a constraint-checked `downcast$nat` helper.
+  -- Composite `is`/`as` (above) is unaffected — it still flows to the tag machinery.
+  { name := "as_datatype_identity", outcome := .verifies,
+    why := "`w as Wrapper` on a datatype is the identity (tag-free); the read-back value is preserved"
     src := r"
 datatype Wrapper { MkW(v: int) }
-procedure u() opaque { var w: Wrapper := MkW(3); var w2: Wrapper := w as Wrapper; assert 1 == 1 };"},
+procedure u() opaque { var w: Wrapper := MkW(3); var w2: Wrapper := w as Wrapper; assert Wrapper..v!(w2) == 3 };"},
 
-  { name := "is_primitive_target_rejected", outcome := .rejectedExactly .UserError,
-    why := "`5 is int` on a primitive is not a composite test — rejected cleanly, not a silently-verifying .Hole"
+  { name := "as_primitive_identity", outcome := .verifies,
+    why := "`5 as int` is the identity — value preserved (was a silently-mis-verifying `.Hole` before support)"
+    src := r"
+procedure u() opaque { var x: int := 5 as int; assert x == 5 };"},
+
+  { name := "is_primitive_true", outcome := .verifies,
+    why := "`5 is int` is statically true (a primitive is its own type)"
     src := r"
 procedure u() opaque { var b: bool := 5 is int; assert b };"},
 
-  { name := "as_constrained_target_rejected", outcome := .rejectedExactly .UserError,
-    why := "`5 as nat` on a constrained type is not a composite cast — rejected cleanly at resolution (unfold sees the base `int`)"
+  { name := "as_alias_identity", outcome := .verifies,
+    why := "`5 as Foo` where `Foo = int` unfolds to a primitive identity cast"
+    src := r"
+type Foo = int
+procedure u() opaque { var x: Foo := 5 as Foo; assert x == 5 };"},
+
+  { name := "as_constrained_checked", outcome := .verifies,
+    why := "`5 as nat` (nat = x:int where x>=0) discharges `nat$constraint(5)` via the downcast$nat helper and preserves the value"
     src := r"
 constrained nat = x: int where x >= 0 witness 0
 procedure u() opaque { var n: nat := 5 as nat; assert n == 5 };"},
+
+  { name := "as_constrained_negative_fails", outcome := .failsAtLeast 1,
+    why := "SOUNDNESS: `-1 as nat` must FAIL — the downcast$nat `requires nat$constraint(-1)` obligation is unprovable, so the cast is not a silent identity"
+    src := r"
+constrained nat = x: int where x >= 0 witness 0
+procedure u() opaque { var n: nat := (-1) as nat; assert 1 == 1 };"},
+
+  { name := "is_constrained_true", outcome := .verifies,
+    why := "`5 is nat` lowers to `nat$constraint(5)`, provably true"
+    src := r"
+constrained nat = x: int where x >= 0 witness 0
+procedure u() opaque { var b: bool := 5 is nat; assert b };"},
+
+  { name := "is_constrained_negative_false", outcome := .verifies,
+    why := "SOUNDNESS: `(-1) is nat` is `nat$constraint(-1)`, provably FALSE — `is` reflects the constraint, not vacuously true"
+    src := r"
+constrained nat = x: int where x >= 0 witness 0
+procedure u() opaque { var b: bool := (-1) is nat; assert !b };"},
 
   -- SOUNDNESS: `#`-call on a NON-COMPOSITE receiver must be REJECTED, not silently bound to a
   -- same-named top-level static procedure. Was a silent unsound accept: `z#sideEffect(-1)`

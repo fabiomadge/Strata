@@ -2196,23 +2196,6 @@ def Synth.new (ref : Identifier) (typeArgs : List HighTypeMd) (source : Option F
     else { val := HighType.Applied { val := .UserDefined ref', source := source } typeArgs', source := source }
   pure (.New ref' typeArgs', ty)
 
-/-- Is the target type of an `is`/`as` a NON-composite (so the cast is unsupported)?
-    `is`/`as` are only implemented for composite (class) types: lowering keys off a
-    runtime type tag that only composites carry (`TypeHierarchy`), and only a composite
-    target has a `downcast$T` helper (`HeapParameterization`). A non-composite target
-    otherwise reaches lowering and fails as an internal error (a datatype target →
-    dangling `downcast$T`; a primitive → a `.Hole` that silently mis-verifies), so reject
-    it here with a clean diagnostic instead. `unfold` first, so an alias/constrained type
-    is judged by its base (an alias OF a composite is fine); `.Unknown` (prior error) and
-    `.TVar` (a type param, concretized + re-checked after monomorphization) pass through. -/
-def castTargetIsNonComposite (ctx : TypeLattice) (ty : HighTypeMd) : Bool :=
-  match (ctx.unfold ty).val with
-  | .Unknown => false
-  | .TVar _ => false
-  | u => match highBaseName? u with
-         | some name => ! ctx.parentExprMap.contains name.text
-         | none => true
-
 /-- (AsType)
     ```
     Γ ⊢ target ⇒ U
@@ -2230,8 +2213,10 @@ def castTargetIsNonComposite (ctx : TypeLattice) (ty : HighTypeMd) : Bool :=
     synthesized type is `T` — the user's claim is honored once the
     relation check passes.
 
-    `is`/`as` are supported only for COMPOSITE targets (see
-    `castTargetIsNonComposite`); a non-composite target is rejected up front. -/
+    `is`/`as` are supported for composite targets (lowered via the type-tag
+    machinery / `downcast$T`) AND for non-composite targets (datatype/primitive/
+    alias/constrained), which `ConstrainedTypeElim` eliminates: primitive/datatype/
+    alias to identity, constrained to a constraint-checked `downcast$T`. -/
 def Synth.asType (exprMd : StmtExprMd)
     (target : StmtExprMd) (ty : HighTypeMd)
     (h : exprMd.val = .AsType target ty) :
@@ -2239,11 +2224,7 @@ def Synth.asType (exprMd : StmtExprMd)
   let (target', targetTy) ← Synth.resolveStmtExpr target
   let ty' ← resolveHighType ty
   let ctx := (← get).typeLattice
-  if castTargetIsNonComposite ctx ty' then
-    let diag := diagnosticFromSource ty.source
-      s!"'as' is only supported for composite (class) types; '{formatType ty'}' is not a composite type"
-    modify fun s => { s with errors := s.errors.push diag }
-  else unless isConsistentSubtype ctx targetTy ty' || isConsistentSubtype ctx ty' targetTy do
+  unless isConsistentSubtype ctx targetTy ty' || isConsistentSubtype ctx ty' targetTy do
     let diag := diagnosticFromSource target.source
       s!"cannot cast unrelated type '{formatType targetTy}' to '{formatType ty'}'"
     modify fun s => { s with errors := s.errors.push diag }
@@ -2272,11 +2253,7 @@ def Synth.isType (exprMd : StmtExprMd)
   let (target', targetTy) ← Synth.resolveStmtExpr target
   let ty' ← resolveHighType ty
   let ctx := (← get).typeLattice
-  if castTargetIsNonComposite ctx ty' then
-    let diag := diagnosticFromSource ty.source
-      s!"'is' is only supported for composite (class) types; '{formatType ty'}' is not a composite type"
-    modify fun s => { s with errors := s.errors.push diag }
-  else unless isConsistentSubtype ctx targetTy ty' || isConsistentSubtype ctx ty' targetTy do
+  unless isConsistentSubtype ctx targetTy ty' || isConsistentSubtype ctx ty' targetTy do
     let diag := diagnosticFromSource target.source
       s!"cannot test unrelated type '{formatType targetTy}' against '{formatType ty'}'"
     modify fun s => { s with errors := s.errors.push diag }

@@ -50,6 +50,17 @@ def resolveType (ptMap : ConstrainedTypeMap) (ty : HighTypeMd) : HighTypeMd :=
 def isConstrainedType (ptMap : ConstrainedTypeMap) (ty : HighType) : Bool :=
   match ty with | .UserDefined name => ptMap.contains name.text | _ => false
 
+/-- Does `ty` name a composite type (peeling `.Applied`/`.UserDefined` to a base
+    name and consulting the model)? Only composites should reach the
+    HeapParameterization / TypeHierarchy `is`/`as` lowering; every other kind is
+    eliminated here in `resolveExprNode`. -/
+def isCompositeTarget (model : SemanticModel) (ty : HighType) : Bool :=
+  match highBaseName? ty with
+  | some name => match model.get name with
+    | .compositeType _ => true
+    | _ => false
+  | none => false
+
 /-- Build a call to the constraint function for a constrained type, asserting
     the constraint on the read-back expression `ref`. Returns `none` if `ty` is
     not a constrained type.
@@ -94,14 +105,58 @@ def mkConstraintFunc (ptMap : ConstrainedTypeMap) (ct : ConstrainedType) : Proce
     decreases := none
     preconditions := [] }
 
+/-- Generate the downcast helper for a constrained type `T` (base `B`):
+    `function downcast$T(p: B): B requires T$constraint(p) { p }`.
+    Emitted alongside the `T$constraint` predicate. The `x as T` arm of
+    `resolveExprNode` rewrites to a call to this helper. A call is a pure term
+    (works in a contract position), and its precondition is discharged by
+    PrecondElim as a well-definedness obligation — exactly like the composite
+    `downcast$C` helper synthesized by TypeHierarchy. -/
+def mkConstraintDowncastFunc (ptMap : ConstrainedTypeMap) (ct : ConstrainedType) : Procedure :=
+  let baseType := resolveType ptMap ct.base
+  let pRef : StmtExprMd := ⟨.Var (.Local "p"), none⟩
+  let pre : StmtExprMd := ⟨.StaticCall (mkId s!"{ct.name.text}$constraint") [pRef], none⟩
+  { name := downcastProcName ct.name
+    inputs := [{ name := "p", type := baseType }]
+    outputs := [{ name := mkId "r", type := baseType }]
+    preconditions := [{ condition := pre }]
+    -- Wrap the returned value in `.Return` (as `mkConstraintFunc` does): this
+    -- helper is emitted at pipeline pos 121, so it must flow through the
+    -- return-handling passes (mergeAndLiftReturns, eliminateValueInReturns);
+    -- a bare `.Transparent pRef` is rejected ("transparent body ending with a
+    -- Var statement"). The composite `downcast$C` helper can use a bare body
+    -- only because TypeHierarchy synthesizes it AFTER those passes.
+    body := .Transparent ⟨.Return (some pRef), none⟩
+    isFunctional := true
+    decreases := none }
+
 def resolveVariable (ptMap : ConstrainedTypeMap) (v : VariableMd) : VariableMd :=
   match v.val with
   | .Declare param => ⟨.Declare { param with type := resolveType ptMap param.type }, v.source⟩
   | _ => v
 
-/-- Resolve constrained types in type positions and inject constraint calls into quantifier bodies.
+/-- Resolve constrained types in type positions, inject constraint calls into
+    quantifier bodies, and FULLY eliminate `is`/`as` for every NON-composite
+    target type. This is the single, consolidated home for non-composite
+    `is`/`as` lowering — composites are left untouched here and flow to
+    HeapParameterization / TypeHierarchy exactly as before.
+
+    - Constrained target `T`:
+      - `x is T` → `T$constraint(x)` (the generated constraint predicate).
+      - `x as T` → `downcast$T(x)`, a call to a generated helper
+        `function downcast$T(p: base): base requires T$constraint(p) { p }`.
+        A call is a pure term, so — unlike an `{ assert …; x }` block — it works
+        in a CONTRACT position; its precondition is discharged by PrecondElim as
+        a well-definedness obligation (mirroring the composite `downcast$C` path).
+    - Other non-composite target (primitive / alias-to-primitive / datatype):
+      Resolution has already enforced the lineage check (same-or-subtype), so
+      nothing remains to check at runtime — `x is T` → `true`, `x as T` → `x`.
+    - Composite target: leave the `.AsType`/`.IsType` node in place (only its
+      type is normalized via `resolveType`, an identity on composites) so
+      HeapParameterization / TypeHierarchy lower it as today.
+
     Recursion into StmtExprMd children is handled by `mapStmtExpr`. -/
-def resolveExprNode (ptMap : ConstrainedTypeMap) (expr : StmtExprMd) : StmtExprMd :=
+def resolveExprNode (ptMap : ConstrainedTypeMap) (model : SemanticModel) (expr : StmtExprMd) : StmtExprMd :=
   let source := expr.source
 
   match expr.val with
@@ -120,8 +175,28 @@ def resolveExprNode (ptMap : ConstrainedTypeMap) (expr : StmtExprMd) : StmtExprM
       | some c => ⟨.PrimitiveOp combiner [c, body], source⟩
       | none => body
     ⟨.Quantifier mode param' trigger injected, source⟩
-  | .AsType t ty => ⟨.AsType t (resolveType ptMap ty), source⟩
-  | .IsType t ty => ⟨.IsType t (resolveType ptMap ty), source⟩
+  | .AsType t ty =>
+    match ty.val with
+    | .UserDefined name =>
+      match ptMap.get? name.text with
+      | some _ => ⟨.StaticCall (downcastProcName name) [t], source⟩  -- constrained: helper call
+      | none =>
+        if isCompositeTarget model ty.val then ⟨.AsType t ty, source⟩  -- composite: leave for HeapParam
+        else t  -- datatype / non-constrained non-composite: identity
+    | _ =>
+      if isCompositeTarget model ty.val then ⟨.AsType t (resolveType ptMap ty), source⟩
+      else t  -- primitive / alias-to-primitive: identity
+  | .IsType t ty =>
+    match ty.val with
+    | .UserDefined name =>
+      match ptMap.get? name.text with
+      | some _ => ⟨.StaticCall (mkId s!"{name.text}$constraint") [t], source⟩  -- constrained predicate
+      | none =>
+        if isCompositeTarget model ty.val then ⟨.IsType t ty, source⟩  -- composite: leave for TypeHierarchy
+        else ⟨.LiteralBool true, source⟩  -- datatype / non-composite: lineage already checked
+    | _ =>
+      if isCompositeTarget model ty.val then ⟨.IsType t (resolveType ptMap ty), source⟩
+      else ⟨.LiteralBool true, source⟩  -- primitive / alias-to-primitive: lineage already checked
   | _ => expr
 
 /-- Per-node constrained-type elimination, applied bottom-up (with flattening)
@@ -181,7 +256,7 @@ def elimProc (ptMap : ConstrainedTypeMap) (model : SemanticModel) (proc : Proced
     .Opaque (postconds ++ outputEnsures) impl' modif
   | .Abstract postconds => .Abstract (postconds ++ outputEnsures)
   | .External => .External
-  let resolve := mapStmtExpr (resolveExprNode ptMap)
+  let resolve := mapStmtExpr (resolveExprNode ptMap model)
   let resolveBody : Body → Body := fun body => match body with
     | .Transparent b => .Transparent (resolve b)
     | .Opaque ps impl modif => .Opaque (ps.map (·.mapCondition resolve)) (impl.map resolve) (modif.map resolve)
@@ -222,12 +297,58 @@ def elimCompositeType (ptMap : ConstrainedTypeMap) (model : SemanticModel) (ct :
     fields := ct.fields.map fun f => { f with type := resolveType ptMap f.type }
     instanceProcedures := ct.instanceProcedures.map (elimProc ptMap model) }
 
+/-- Collect the `downcast$…` helper names actually called in `proc` (body + all
+    contract positions). At this pipeline position `resolveExprNode` is the ONLY
+    source of `downcast$`-prefixed calls (a `x as Composite` is still an `.AsType`
+    node — its `downcast$C` is minted later by `TypeHierarchy`), so a `downcast$`
+    prefix here means exactly a constrained `x as T` this pass just emitted. -/
+private def collectDowncastCalls (acc : Std.HashSet String) (proc : Procedure) : Std.HashSet String :=
+  let collect (e : StmtExprMd) : StateM (Std.HashSet String) StmtExprMd :=
+    mapStmtExprM (fun n => do
+      match n.val with
+      | .StaticCall callee _ =>
+          if callee.text.startsWith "downcast$" then modify (·.insert callee.text)
+      | _ => pure ()
+      pure n) e
+  let scanBody : Body → StateM (Std.HashSet String) Unit := fun body => do
+    match body with
+    | .Transparent b => let _ ← collect b; pure ()
+    | .Opaque ps impl modif =>
+        for c in ps do let _ ← collect c.condition
+        for e in impl.toList do let _ ← collect e
+        for e in modif do let _ ← collect e
+    | .Abstract ps => for c in ps do let _ ← collect c.condition
+    | .External => pure ()
+  (Id.run do
+    let prog : StateM (Std.HashSet String) Unit := do
+      scanBody proc.body
+      for c in proc.preconditions do let _ ← collect c.condition
+    pure ((prog.run acc).2))
+
 public def constrainedTypeElim (model : SemanticModel) (program : Program)
     : Program × List DiagnosticModel :=
   let ptMap := buildConstrainedTypeMap program.types
-  if ptMap.isEmpty then (program, []) else
+  -- NOTE: we no longer early-return when there are no constrained types. This
+  -- pass is the single home for eliminating `is`/`as` against every
+  -- NON-composite target (primitive, alias, datatype), which must happen even in
+  -- programs with zero constrained types. When `ptMap` is empty, all the
+  -- constraint-type machinery below (constraint predicates, witnesses,
+  -- requires/ensures injection, base-type resolution) is trivially empty/identity,
+  -- and the only effective transform is the `is`/`as` rewrite in `resolveExprNode`.
   let constraintFuncs := program.types.filterMap fun
     | .Constrained ct => some (mkConstraintFunc ptMap ct) | _ => none
+  -- Eliminate first, so we know which `downcast$T` helpers are actually called.
+  let elimStatic := program.staticProcedures.map (elimProc ptMap model)
+  -- A `downcast$T` helper per constrained type makes `x as T` a pure call (usable
+  -- in a contract), matching the composite `downcast$C` path — but emit one ONLY
+  -- when it is actually called, so a constrained type with no `as`-cast does not
+  -- leave a dead helper definition all the way through to Core.
+  let usedDowncasts := elimStatic.foldl collectDowncastCalls {}
+  let constraintDowncasts := program.types.filterMap fun
+    | .Constrained ct =>
+        if usedDowncasts.contains (downcastProcName ct.name).text
+        then some (mkConstraintDowncastFunc ptMap ct) else none
+    | _ => none
   let witnessProcedures := program.types.filterMap fun
     | .Constrained ct => some (mkWitnessProc ptMap ct) | _ => none
   let funcDiags := program.staticProcedures.foldl (init := []) fun acc proc =>
@@ -235,7 +356,8 @@ public def constrainedTypeElim (model : SemanticModel) (program : Program)
       acc.cons (diagnosticFromSource proc.name.source "constrained return types on functions are not yet supported")
     else acc
   ({ program with
-    staticProcedures := constraintFuncs ++ program.staticProcedures.map (elimProc ptMap model)
+    staticProcedures := constraintFuncs ++ constraintDowncasts
+                        ++ elimStatic
                         ++ witnessProcedures
     types := program.types.filterMap fun
       | .Constrained _ => none
